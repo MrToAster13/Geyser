@@ -65,6 +65,7 @@ case $check in
   bug6) source "$here/checks/bug6.sh"; rc=0; check_bug6 || rc=$?; if [ "$rc" -eq 0 ]; then result=0; elif [ "$rc" -eq 3 ]; then echo "check=bug6 PRECONDITION not met" | tee -a "${GITHUB_STEP_SUMMARY:-/dev/null}"; fi ;;
   bug7) source "$here/checks/bug7.sh"; rc=0; check_bug7 || rc=$?; [ "$rc" -eq 0 ] && result=0 ;;
   bug3) source "$here/checks/bug3.sh"; rc=0; check_bug3 || rc=$?; [ "$rc" -eq 0 ] && result=0 ;;
+  bug2) source "$here/checks/bug2.sh"; rc=0; check_bug2 || rc=$?; [ "$rc" -eq 0 ] && result=0 ;;
   *) echo "unknown check $check" >&2; exit 2 ;;
 esac
 
