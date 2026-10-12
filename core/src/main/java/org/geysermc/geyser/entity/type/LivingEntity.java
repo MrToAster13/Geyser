@@ -493,7 +493,20 @@ public class LivingEntity extends Entity implements Tickable {
     }
 
     @Override
+    public void drawTick() {
+        // tick() does not run while the server has the game frozen. Finish the lerp anyway, or the entity
+        // stays part of the way to the position the server has it at for as long as the freeze lasts.
+        if (session.isTickingFrozen()) {
+            lerpTick();
+        }
+    }
+
+    @Override
     public void tick() {
+        lerpTick();
+    }
+
+    private void lerpTick() {
         if (this.lerpSteps > 0) {
             float time = 1.0f / this.lerpSteps;
             float lerpXTotal = GenericMath.lerp(this.position.getX(), this.lerpPosition.getX(), time);
