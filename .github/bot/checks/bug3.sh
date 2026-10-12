@@ -71,12 +71,17 @@ bug3_stop_bot() {
   wait "$pid" 2>/dev/null || BUG3_BOT_RC=$?
 }
 
-# bug3_night: 0 when the day time is in the sleepable night window.
+# bug3_night: 0 when the day time is in the sleepable night window, 1 when it
+# is not, 2 when the query gave no readable time. Paper 26.3 reworded the time
+# feedback ("Set minecraft:overworld to N tick(s)"), so the query result is
+# read as the last number in the first time or tick line after the send.
 bug3_night() {
   local t
-  bug3_cmd 'time query daytime' 'The time is [0-9]+' 10 || return 1
-  t=$(grep -oE 'The time is [0-9]+' <<< "$BUG3_LINE" | grep -oE '[0-9]+$')
-  [ -n "$t" ] && [ "$t" -ge 13000 ] && [ "$t" -lt 23000 ]
+  bug3_cmd 'time query daytime' '(time|tick)[^0-9]*[0-9]+|[0-9]+ tick' 10 || return 2
+  t=$(grep -oE '[0-9]+' <<< "${BUG3_LINE#*]: }" | tail -n 1)
+  [ -n "$t" ] || return 2
+  echo "bug3: day time $t"
+  [ "$t" -ge 13000 ] && [ "$t" -lt 23000 ]
 }
 
 check_bug3() {
@@ -121,7 +126,8 @@ check_bug3() {
   if ! bug3_cmd 'gamerule players_sleeping_percentage 101' 'is now set to:? 101'; then
     bug3_cmd 'gamerule playersSleepingPercentage 101' 'is now set to:? 101' || why+=" sleep percentage gamerule;"
   fi
-  bug3_cmd 'time set 18000' 'Set the time to 18000' || why+=" time set;"
+  bug3_cmd 'time set 18000' 'Set the time to 18000|to 18000 tick' || why+=" time set;"
+  local set_at=$SECONDS
   bug3_cmd 'scoreboard objectives add bug3slept minecraft.custom:minecraft.sleep_in_bed' \
     'Created new objective' || why+=" sleep_in_bed objective;"
   bug3_cmd "setblock $fx $fy $fz minecraft:red_bed[facing=east,part=foot]" 'Changed the block|Could not set' || why+=" setblock foot;"
@@ -134,7 +140,13 @@ check_bug3() {
   bug3_test "if block $fx $fy $fz minecraft:red_bed[part=foot,facing=east,occupied=false]" || why+=" bed foot missing;"
   bug3_test "if block $hx $fy $fz minecraft:red_bed[part=head,facing=east,occupied=false]" || why+=" bed head missing;"
   bug3_test "if block $fx $((fy + 1)) $fz minecraft:air" || why+=" block above bed foot not air;"
-  bug3_night || why+=" not night;"
+  # Unreadable query: the confirmed "time set 18000" above is the proof, and
+  # the sleep_in_bed stat below proves it again (Java only lets players sleep
+  # at night).
+  local nrc=0
+  bug3_night || nrc=$?
+  [ "$nrc" -eq 1 ] && why+=" not night;"
+  [ "$nrc" -eq 2 ] && echo "bug3: time query unreadable; night from the confirmed time set 18000"
   bug3_test "as $name if entity @s[gamemode=!spectator]" || why+=" bot is spectator or not found;"
   if [ -n "$why" ]; then
     bug3_stop_bot "$bot_pid"; bug3_precondition "$why"; return 3
@@ -165,7 +177,17 @@ check_bug3() {
   local occupied=0
   bug3_test "if block $hx $fy $fz minecraft:red_bed[part=head,occupied=true]" || occupied=$?
   # The hold must have stayed in the night (R2-e), or a wake proves nothing.
-  bug3_night || why+=" night ended during the hold;"
+  nrc=0
+  bug3_night || nrc=$?
+  [ "$nrc" -eq 1 ] && why+=" night ended during the hold;"
+  if [ "$nrc" -eq 2 ]; then
+    # 20 ticks per second from 18000; night ends at 23000 (250 s).
+    if [ $((SECONDS - set_at)) -lt 200 ]; then
+      echo "bug3: time query unreadable; $((SECONDS - set_at)) s since time set 18000, still night"
+    else
+      why+=" night may have ended during the hold ($((SECONDS - set_at)) s, time unreadable);"
+    fi
+  fi
   touch "$work/stop" || return 3
   bug3_stop_bot "$bot_pid"
   echo "bug3: bot log (exit $BUG3_BOT_RC):"; cat "$work/bot.log"
