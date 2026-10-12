@@ -256,6 +256,7 @@ async function run () {
   if (fa.delta + fa.abs === 0) why.push('no pig move packet during the fall')
   if (why.length) {
     writeResult(`PRECONDITION ${why.join('; ')}`)
+    ack('end')
     return finish(3, why.join('; '))
   }
 
@@ -264,6 +265,7 @@ async function run () {
     `slide_packets=${sl.delta}+${sl.abs} fall_packets=${fa.delta}+${fa.abs} limit=${LIMIT}`
   const bad = ds.d > LIMIT || df.d > LIMIT || sl.maxSnap > LIMIT || fa.maxSnap > LIMIT
   writeResult(`${bad ? 'FAIL' : 'PASS'} ${metrics}`)
+  ack('end')
   finish(0, metrics)
 }
 

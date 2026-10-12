@@ -84,11 +84,11 @@ check_bug4() {
   (cd "$here" && BOT_NAME=Bot1 BUG4_DIR="$work" exec node bug4.js) > "$work/bot.log" 2>&1 &
   bot_pid=$!
 
-  if ! wait_log "${LOG_PREFIX}\.?Bot1 joined the game" 120; then
+  if ! wait_log "${LOG_PREFIX}(System chat: )?\.?Bot1 joined the game" 120; then
     bug4_abort "bot did not join"; return 3
   fi
-  name=$(grep -E "${LOG_PREFIX}\.?Bot1 joined the game" "$LOG" | head -n 1 \
-    | sed -E "s/${LOG_PREFIX}//; s/ joined the game.*//")
+  name=$(grep -E "${LOG_PREFIX}(System chat: )?\.?Bot1 joined the game" "$LOG" | head -n 1 \
+    | sed -E "s|${LOG_PREFIX}(System chat: )?||; s| joined the game.*||")
   echo "bug4: Paper name '$name'"
 
   if ! bug4_wait_file "$work/pos" 30 "$bot_pid"; then
@@ -113,14 +113,14 @@ check_bug4() {
   fi
   echo "bug4: summon -> ${BUG4_LINE#*]: }"
   if ! bug4_cmd "attribute @e[tag=bug4,limit=1] minecraft:movement_speed base set 0" \
-      'Set base value|is not a living entity|No entity was found|Unknown|<--\[HERE\]' \
-     || [[ $BUG4_LINE != *'Set base value'* ]]; then
+      'Base value for attribute|not a valid entity|has no attribute|No entity was found|Unknown|<--\[HERE\]' \
+     || [[ $BUG4_LINE != *'Base value for attribute'* ]]; then
     bug4_abort "could not set movement_speed 0: ${BUG4_LINE#*]: }"; return 3
   fi
   bug4_cmd "effect give @e[tag=bug4,limit=1] minecraft:resistance 300 4 true" \
     'Applied effect|Unable|No entity|<--\[HERE\]' && echo "bug4: effect -> ${BUG4_LINE#*]: }"
   bug4_cmd "attribute @e[tag=bug4,limit=1] minecraft:safe_fall_distance base set 1000" \
-    'Set base value|Unknown|No entity|<--\[HERE\]' && echo "bug4: attribute -> ${BUG4_LINE#*]: }"
+    'Base value for attribute|has no attribute|Unknown|No entity|<--\[HERE\]' && echo "bug4: attribute -> ${BUG4_LINE#*]: }"
 
   if ! bug4_wait_file "$work/pig" 20 "$bot_pid"; then
     bug4_abort "bot got no add_entity for the pig"; return 3
