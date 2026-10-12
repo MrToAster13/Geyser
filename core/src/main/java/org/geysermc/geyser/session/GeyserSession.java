@@ -137,6 +137,7 @@ import org.geysermc.geyser.entity.type.BoatEntity;
 import org.geysermc.geyser.entity.type.Entity;
 import org.geysermc.geyser.entity.type.FishingHookEntity;
 import org.geysermc.geyser.entity.type.ItemFrameEntity;
+import org.geysermc.geyser.entity.type.LivingEntity;
 import org.geysermc.geyser.entity.type.Tickable;
 import org.geysermc.geyser.entity.type.player.PlayerEntity;
 import org.geysermc.geyser.entity.type.player.SessionPlayerEntity;
@@ -1389,6 +1390,9 @@ public class GeyserSession implements GeyserConnection, GeyserCommandSource {
                 entity.drawTick();
                 if (gameShouldUpdate) {
                     entity.tick();
+                } else if (entity instanceof LivingEntity livingEntity) {
+                    // Finish moving to positions the server sent before or during the freeze
+                    livingEntity.tickLerp();
                 }
             }
 

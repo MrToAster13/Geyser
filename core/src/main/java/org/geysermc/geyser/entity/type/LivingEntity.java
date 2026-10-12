@@ -477,6 +477,15 @@ public class LivingEntity extends Entity implements Tickable {
 
     @Override
     public void tick() {
+        tickLerp();
+    }
+
+    /**
+     * Sends one lerp step toward the last position the Java server sent for this entity.
+     * Also called while the server has the game frozen, so the Bedrock client does not keep showing
+     * an entity part of the way to a position the server has already sent.
+     */
+    public void tickLerp() {
         if (this.lerpSteps > 0) {
             float time = 1.0f / this.lerpSteps;
             float lerpXTotal = GenericMath.lerp(this.position.getX(), this.lerpPosition.getX(), time);
