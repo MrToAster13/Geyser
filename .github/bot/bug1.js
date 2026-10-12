@@ -107,11 +107,17 @@ function useHoe () {
   // Preconditions, each from Geyser's side of the connection (R2-e).
   const hoeId = itemIds.get(HOE)
   if (hoeId === undefined) return finish(3, `${HOE} not in the item registry`)
-  const held = invSlots.get(0)
-  if (!held || held.network_id !== hoeId) {
-    return finish(3, `hotbar slot 0 holds network_id=${held ? held.network_id : 'none'}, want ${hoeId} (${HOE})`)
+  const slot0 = invSlots.get(0)
+  if (!slot0 || slot0.network_id !== hoeId) {
+    return finish(3, `hotbar slot 0 holds network_id=${slot0 ? slot0.network_id : 'none'}, want ${hoeId} (${HOE})`)
   }
-  log(`precondition: hotbar slot 0 holds ${HOE} network_id=${hoeId} stack_id=${held.has_stack_id ? held.stack_id : 'none'}`)
+  log(`precondition: hotbar slot 0 holds ${HOE} network_id=${hoeId} stack_id=${slot0.has_stack_id ? slot0.stack_id : 'none'}`)
+  // Since protocol 975 a serverbound item has a variant varint before the
+  // stack net id; bedrock-protocol's ItemV4 omits it, and Geyser kicks with
+  // "Not oneOf<ItemStackNetId, ...>". Without a net id both layouts are the
+  // same bytes. Geyser compares only the item definition for the held item.
+  const held = { ...slot0, has_stack_id: false }
+  delete held.stack_id
   if (blockUpdates.length === 0) return finish(3, 'Geyser sent no update_block for the target after setblock')
   const blockRuntimeId = blockUpdates[blockUpdates.length - 1]
   log(`precondition: Geyser's view of the target block runtime_id=${blockRuntimeId}`)

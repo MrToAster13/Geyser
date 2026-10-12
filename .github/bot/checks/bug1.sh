@@ -29,7 +29,7 @@ bug1_cmd() {
 # bug1_test <execute condition>: 0 when "Test passed", 1 when "Test failed",
 # 2 when no result line appears.
 bug1_test() {
-  bug1_cmd "execute $1" 'Test (passed|failed)' 10 || return 2
+  bug1_cmd "execute $1" 'Test (passed|failed)|No entity was found' 10 || return 2
   echo "bug1: execute $1 -> ${BUG1_LINE#*]: }"
   case $BUG1_LINE in *'Test passed'*) return 0 ;; *) return 1 ;; esac
 }
@@ -119,6 +119,8 @@ check_bug1() {
     bug1_stop_bot "$bot_pid"; bug1_precondition "$why"; return 3
   fi
 
+  local go_line
+  go_line=$(wc -l < "$LOG") || return 3
   touch "$work/go" || return 3
   if ! bug1_wait_file "$work/used" 30 "$bot_pid"; then
     bug1_stop_bot "$bot_pid"; cat "$work/bot.log"
@@ -126,6 +128,16 @@ check_bug1() {
   fi
   # Let the server process the click before reading the block.
   sleep 3
+  # The click only counts if the bot was still connected when it arrived.
+  local gone
+  gone=$(tail -n +"$((go_line + 1))" "$LOG" \
+    | grep -E "Illegal packet from Bot1|Bot1 has disconnected|${LOG_PREFIX}(System chat: )?\.?Bot1 (left the game|lost connection)" \
+    | head -n 3 || true)
+  if [ -n "$gone" ]; then
+    printf '%s\n' "$gone"
+    bug1_stop_bot "$bot_pid"; cat "$work/bot.log"
+    bug1_precondition "bot was disconnected after go, so the click may not have reached Paper"; return 3
+  fi
 
   if bug1_test "if block $x $y $z minecraft:farmland"; then
     rc=0
