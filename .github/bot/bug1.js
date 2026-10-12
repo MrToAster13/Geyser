@@ -3,8 +3,8 @@
 // Talks to checks/bug1.sh through files in BUG1_DIR:
 //   bot writes  target  "X Y Z" of the block to till, picked next to its feet
 //   shell writes go      after it placed the block and gave the hoe
-//   bot writes  used     after it sent the click
-// Exit 0: click sent. Exit 3: a precondition failed. Exit 1: kick, error, timeout.
+//   bot writes  used     after it sent the last of 20 clicks (a held button)
+// Exit 0: clicks sent. Exit 3: a precondition failed. Exit 1: kick, error, timeout.
 const fs = require('fs')
 const path = require('path')
 const bedrock = require('bedrock-protocol')
@@ -39,8 +39,15 @@ const client = bedrock.createClient({
   port: 19132,
   username: name,
   offline: true,
-  version: process.env.BEDROCK_VERSION || '1.26.51'
+  version: process.env.BEDROCK_VERSION || '1.26.51',
+  // PlayStation with a controller, like the bug report. DeviceOS 11 is PS4
+  // ("PlayStation", all PlayStation platforms) in floodgate DeviceOs and in
+  // bedrock-protocol's auth.js. Input mode 3 is CONTROLLER in floodgate InputMode.
+  deviceOS: 11,
+  skinData: { CurrentInputMode: 3, DefaultInputMode: 3, UIProfile: 0 }
 })
+const CLICKS = 20 // a held button: one click_block per tick
+const CLICK_MS = 50
 
 const itemIds = new Map() // item name -> network id, from item_registry
 const invSlots = new Map() // player inventory slot -> ItemV4, as Geyser sent it
@@ -138,7 +145,13 @@ function useHoe () {
     window_id: 'inventory'
   })
 
-  setTimeout(() => {
+  // Held button: CLICKS click_block transactions, CLICK_MS apart, same block
+  // and face. Each click carries the runtime id of the latest update_block for
+  // the target, as a real client's view of the block would.
+  const firstUpdateAfter = blockUpdates.length
+  let sent = 0
+  const click = () => {
+    const runtimeId = blockUpdates[blockUpdates.length - 1]
     client.write('inventory_transaction', {
       transaction: {
         legacy: { legacy_request_id: 0 },
@@ -154,17 +167,24 @@ function useHoe () {
           held_item: held,
           player_pos: { x: eye.x, y: eye.y, z: eye.z },
           click_pos: { x: 0.5, y: 1, z: 0.5 },
-          block_runtime_id: blockRuntimeId,
+          block_runtime_id: runtimeId,
           client_prediction: 'success',
           client_cooldown_state: 'off'
         }
       }
     })
     used = true
-    log(`sent item_use click_block at ${target.x} ${target.y} ${target.z} face up`)
+    sent++
+    log(`click ${sent}/${CLICKS} click_block at ${target.x} ${target.y} ${target.z} face up block_runtime_id=${runtimeId}`)
+    if (sent < CLICKS) return setTimeout(click, CLICK_MS)
     fs.writeFileSync(path.join(dir, 'used'), 'used\n')
-    setTimeout(() => finish(0, `click sent, stayed ${afterSecs} s`), afterSecs * 1000)
-  }, 500)
+    setTimeout(() => {
+      const after = blockUpdates.slice(firstUpdateAfter)
+      log(`update_block summary: before_clicks=${firstUpdateAfter} [${blockUpdates.slice(0, firstUpdateAfter).join(',')}] after_clicks=${after.length} [${after.join(',')}]`)
+      finish(0, `${sent} clicks sent, stayed ${afterSecs} s`)
+    }, afterSecs * 1000)
+  }
+  setTimeout(click, 500)
 }
 
 client.on('kick', (p) => finish(1, `kicked: ${JSON.stringify(p)}`))
