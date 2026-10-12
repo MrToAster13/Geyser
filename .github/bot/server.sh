@@ -88,14 +88,16 @@ wait_log() {
 }
 
 wait_ready() {
-  wait_log 'Done \([0-9.]+s\)!' 300 || return 1
+  # "For help" picks the server's Done line, not Geyser's "[Geyser-Spigot] Done".
+  wait_log 'Done \([0-9.]+s\)! For help' 300 || return 1
   # R17-a self-test: the prefix regex must match the Done line.
-  grep -E "$LOG_PREFIX" "$LOG" | grep -q 'Done (' \
+  grep -E "$LOG_PREFIX" "$LOG" | grep -q 'Done (.*For help' \
     || { echo "prefix regex matched no Done line" >&2; return 1; }
   echo "prefix self-test ok: $(grep -cE "$LOG_PREFIX" "$LOG") prefixed lines"
   # Paper 26.3 build 177 kicked the bot as not whitelisted even with no
   # whitelist settings in server.properties. Turn it off at runtime too.
-  cmd 'whitelist off' "${LOG_PREFIX}Whitelist is (now|already) turned off" || return 1
+  # Paper 26.3 logs console command feedback as "System chat: <text>".
+  cmd 'whitelist off' "${LOG_PREFIX}(System chat: )?Whitelist is (now|already) turned off" || return 1
 }
 
 # cmd <command> <ERE expected in latest.log> [timeout s, default 10]

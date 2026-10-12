@@ -29,7 +29,10 @@ run_join() {
 ARTIFACTS=${ARTIFACTS:-$PWD/bot-logs}
 save_logs() {
   mkdir -p "$ARTIFACTS/$auth"
-  cp "$SERVER_DIR/logs/latest.log" "$SERVER_DIR/console.out" "$ARTIFACTS/$auth/" 2>/dev/null || true
+  local f
+  for f in logs/latest.log console.out server.properties whitelist.json; do
+    cp "$SERVER_DIR/$f" "$ARTIFACTS/$auth/" 2>/dev/null || true
+  done
 }
 trap 'stop_server; save_logs' EXIT
 
