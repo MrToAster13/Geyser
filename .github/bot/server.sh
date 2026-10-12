@@ -41,6 +41,7 @@ spawn-protection=0
 white-list=false
 enforce-whitelist=false
 level-type=minecraft\:flat
+generator-settings={"layers":[{"block":"minecraft:bedrock","height":1},{"block":"minecraft:dirt","height":2},{"block":"minecraft:grass_block","height":1}],"biome":"minecraft:plains"}
 generate-structures=false
 view-distance=4
 simulation-distance=4
@@ -91,7 +92,8 @@ wait_ready() {
   # "For help" picks the server's Done line, not Geyser's "[Geyser-Spigot] Done".
   wait_log 'Done \([0-9.]+s\)! For help' 300 || return 1
   # R17-a self-test: the prefix regex must match the Done line.
-  grep -E "$LOG_PREFIX" "$LOG" | grep -q 'Done (.*For help' \
+  # One grep: a pipe into grep -q can SIGPIPE the first grep under pipefail.
+  grep -qE "${LOG_PREFIX}Done \([0-9.]+s\)! For help" "$LOG" \
     || { echo "prefix regex matched no Done line" >&2; return 1; }
   echo "prefix self-test ok: $(grep -cE "$LOG_PREFIX" "$LOG") prefixed lines"
   # Paper 26.3 build 177 kicked the bot as not whitelisted even with no
