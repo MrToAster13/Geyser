@@ -173,7 +173,8 @@ check_bug4crowd() {
 
   if ! bug4_put wander "$count"; then bug4c_abort "bot did not start the wander phase"; return 3; fi
   seed=${STRESS_SEED:-$(date +%s)}
-  echo "bug4crowd: wandering for $BUG4C_WANDER_SECS s, random events for $((BUG4C_WANDER_SECS - BUG4C_SETTLE_SECS)) s, STRESS_SEED=$seed"
+  echo "bug4crowd: random events for $((BUG4C_WANDER_SECS - BUG4C_SETTLE_SECS)) s, then NoAI and at least" \
+    "$BUG4C_SETTLE_SECS s of settling before the freeze, STRESS_SEED=$seed"
   n=$(wc -l < "$LOG")
   bug4c_events "$((BUG4C_WANDER_SECS - BUG4C_SETTLE_SECS))" "$i" "$seed" &
   ev_pid=$!
@@ -187,17 +188,18 @@ check_bug4crowd() {
   echo "bug4crowd: jump events (tp, Motion, ride) logged: $(wc -l < "$work/kicks")"
 
   # Stop every mob, then let the server keep ticking so pending lerps,
-  # knockback and falls finish before the freeze.
+  # knockback and falls finish before the freeze. The bot counts moves from
+  # here on as settle moves, including any the NoAI change itself causes.
+  if ! bug4_put settle go; then bug4c_abort "bot did not start the settle phase"; return 3; fi
   n=$(wc -l < "$LOG")
   if ! bug4_cmd "execute as @e[tag=b4c] run data merge entity @s {NoAI:1b}" \
-     'Modified entity data|Nothing changed|No entity|Unable|<--\[HERE\]' \
-     || [[ $BUG4_LINE == *HERE* || $BUG4_LINE == *'No entity'* || $BUG4_LINE == *Unable* ]]; then
+     'Modified entity data of b4m|<--\[HERE\]' || [[ $BUG4_LINE == *HERE* ]]; then
     bug4c_abort "NoAI failed: ${BUG4_LINE#*]: }"; return 3
   fi
   sleep 0.5
-  echo "bug4crowd: NoAI set on $(tail -n +"$((n + 1))" "$LOG" | grep -c 'Modified entity data' || true) mobs" \
-    "(first answer: ${BUG4_LINE#*]: })"
-  if ! bug4_put settle go; then bug4c_abort "bot did not start the settle phase"; return 3; fi
+  got=$(tail -n +"$((n + 1))" "$LOG" | grep -ciE 'Modified entity data of b4m' || true)
+  echo "bug4crowd: NoAI set on $got of $count mobs"
+  if [ "${got:-0}" -lt 50 ]; then bug4c_abort "NoAI set on only ${got:-0} mobs"; return 3; fi
   echo "bug4crowd: settling unfrozen for $BUG4C_SETTLE_SECS s"
   sleep "$BUG4C_SETTLE_SECS"
 
@@ -208,12 +210,16 @@ check_bug4crowd() {
   if [ "$BUG4C_GOT" -lt 50 ]; then bug4c_abort "pre-freeze server positions for only $BUG4C_GOT mobs"; return 3; fi
   if ! bug4_put pre "$BUG4C_LINES"; then bug4c_abort "bot did not read the pre-freeze positions"; return 3; fi
 
+  # The time just before the freeze command, in epoch ms, tells the bot where
+  # its "moved in the last second before the freeze" window ends.
+  local tfreeze
+  tfreeze=$(date +%s%3N)
   if ! bug4_cmd "tick freeze" 'frozen|freeze|<--\[HERE\]|Unknown' \
      || [[ $BUG4_LINE == *HERE* || $BUG4_LINE == *nknown* ]]; then
     bug4c_abort "tick freeze failed: ${BUG4_LINE#*]: }"; return 3
   fi
   echo "bug4crowd: freeze -> ${BUG4_LINE#*]: }"
-  if ! bug4_put frozen go; then bug4c_abort "bot did not note the freeze"; return 3; fi
+  if ! bug4_put frozen "$tfreeze"; then bug4c_abort "bot did not note the freeze"; return 3; fi
   sleep 0.5
   if ! bug4_put snap go; then bug4c_abort "bot did not take the snapshot"; return 3; fi
 

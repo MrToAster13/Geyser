@@ -9,11 +9,11 @@
 // file, the bot reads it and answers with <name>_ok:
 //   bot writes   pos     "X Y Z" block the bot stands in
 //   shell writes wander  "<count>" mobs summoned; counting starts
-//   shell writes settle  events are over and every mob has NoAI; the mobs
-//                        settle unfrozen so pending lerps, knockback and
-//                        falls finish
+//   shell writes settle  events are over; the shell then gives every mob
+//                        NoAI and the mobs settle unfrozen so pending
+//                        lerps, knockback and falls finish
 //   shell writes pre     "b4mN x y z" lines, server Pos just before the freeze
-//   shell writes frozen  right after tick freeze
+//   shell writes frozen  "<epoch ms>" taken just before tick freeze
 //   shell writes snap    0.5 s later; the bot snapshots every position
 //   shell writes truth   "b4mN x y z" lines, the server Pos of every mob
 //   shell writes end     -> bot writes result and exits
@@ -50,6 +50,9 @@ const KICK_MS = 300
 const LATE_MS = 1000
 // Server Pos change between the pre and truth reads that counts as moving.
 const SERVER_EPS = 0.001
+// A mob with no pre-freeze server Pos cannot be shown at rest, so it leaves
+// the verdict; more than this many is a precondition failure.
+const MAX_NO_PRE = 5
 
 if (!dir || !(LIMIT > 0)) {
   console.log(`bug4crowd-bot ${name}: FAIL bad BUG4_DIR or BUG4_LIMIT`)
@@ -244,7 +247,7 @@ async function run () {
   await waitFile('settle')
   phase = 'settle'
   const tSettle = Date.now()
-  log('settle start: events over, every mob has NoAI, server still ticking')
+  log('settle start: events over, NoAI next, server still ticking')
   ack('settle')
 
   const readPos = (text) => {
@@ -261,10 +264,11 @@ async function run () {
   log(`server Pos before the freeze for ${pre.size} mobs`)
   ack('pre')
 
-  await waitFile('frozen')
+  // The shell sends the epoch ms just before its tick freeze command.
+  const sent = Number(await waitFile('frozen'))
   phase = 'frozen'
-  tFreeze = Date.now()
-  log(`frozen after ${tFreeze - tSettle} ms of settle`)
+  tFreeze = Number.isFinite(sent) && sent > 0 ? Math.min(sent, Date.now()) : Date.now()
+  log(`frozen after ${tFreeze - tSettle} ms of settle (noted ${Date.now() - tFreeze} ms after the freeze command)`)
   ack('frozen')
 
   await waitFile('snap')
@@ -376,6 +380,7 @@ async function run () {
       `(< ${MIN_MOBS}; ${movers.length} still moving)`)
   }
   if (moved * 2 < snap.size) why.push(`only ${moved} of ${snap.size} mobs moved on Bedrock during the wander`)
+  if (noPre > MAX_NO_PRE) why.push(`no pre-freeze server Pos for ${noPre} mobs (> ${MAX_NO_PRE})`)
   const metrics = `mobs_server=${summoned} mobs_bedrock=${snap.size} matched=${all.length - riders.length} ` +
     `settled=${rows.length} riders=${riders.length} moving=${movers.length} ` +
     `moved=${moved} removed=${removedNamed} drift_max=${quantile(ds, 1).toFixed(3)} ` +
@@ -387,12 +392,13 @@ async function run () {
     `jumps_all=${st.all.jumps}/${st.all.steps} jumps_excl_kicks=${st.excl.jumps}/${st.excl.steps} ` +
     `jumps_calm=${st.calm.jumps}/${st.calm.steps} max_jump_all=${st.all.max.toFixed(3)} ` +
     `max_jump_excl=${st.excl.max.toFixed(3)} post_freeze_moved=${postMoved.length} limit=${LIMIT}`
-  if (why.length) {
+  // A settled mob over the limit is lasting error whatever else went wrong.
+  if (why.length && over === 0) {
     writeResult(`PRECONDITION ${why.join('; ')} ${metrics}`)
     ack('end')
     return finish(3, why.join('; '))
   }
-  writeResult(`${over > 0 ? 'FAIL' : 'PASS'} ${metrics}`)
+  writeResult(`${over > 0 ? 'FAIL' : 'PASS'} ${metrics}${why.length ? ` precondition_notes="${why.join('; ')}"` : ''}`)
   ack('end')
   finish(0, metrics)
 }
