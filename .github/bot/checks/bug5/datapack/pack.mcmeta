@@ -1,0 +1,7 @@
+{
+  "pack": {
+    "description": "bug5 bot check: exclusive_set and show_dialog by plain id",
+    "min_format": 121,
+    "max_format": 121
+  }
+}
