@@ -39,7 +39,7 @@ jobs:
       - name: Build Geyser
         run: ./gradlew build
         env:
-          BUILD_NUMBER: ${{ steps.release-info.outputs.curentRelease }}
+          BUILD_NUMBER: ${{ github.repository == 'GeyserMC/Geyser' && steps.release-info.outputs.curentRelease || github.run_number }}
           
       - name: Archive Artifacts
         uses: GeyserMC/actions/upload-multi-artifact@master
