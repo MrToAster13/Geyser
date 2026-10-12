@@ -155,6 +155,12 @@ check_bug3() {
     bug3_stop_bot "$bot_pid"; bug3_precondition "$why"; return 3
   fi
 
+  # Entity stress (STRESS=1): passive mobs and events around the bed from
+  # here until the verdict lines are in latest.log.
+  if [ "${STRESS:-0}" = 1 ] && ! stress_start passive "$fx" "$fy" "$fz"; then
+    bug3_stop_bot "$bot_pid"; bug3_precondition "entity stress did not start"; return 3
+  fi
+
   # latest.log lines before the click; the verdict reads only later lines.
   local click_line
   click_line=$(wc -l < "$LOG") || return 3
@@ -194,6 +200,7 @@ check_bug3() {
       why+=" night may have ended during the hold ($((SECONDS - set_at)) s, time unreadable);"
     fi
   fi
+  if [ "${STRESS:-0}" = 1 ]; then stress_stop; fi
   touch "$work/stop" || return 3
   bug3_stop_bot "$bot_pid"
   echo "bug3: bot log (exit $BUG3_BOT_RC):"; cat "$work/bot.log"

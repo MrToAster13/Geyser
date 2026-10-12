@@ -63,6 +63,11 @@ bug7_run() {
   wait_ready || { bug7_precondition "$label: server not ready"; return 3; }
   work="$SERVER_DIR/bug7"
   mkdir -p "$work" || return 3
+  # Entity stress (STRESS=1) starts before the bot joins, around world spawn.
+  # check_bug7 stops it after this pass returns.
+  if [ "${STRESS:-0}" = 1 ] && ! stress_start mixed; then
+    bug7_precondition "$label: entity stress did not start"; return 3
+  fi
 
   (cd "$here" && BOT_NAME=Bot7 STAY_SECS=30 exec node bug7.js) > "$work/bot.log" 2>&1 &
   bot_pid=$!
@@ -140,12 +145,14 @@ bug7_word() {
 check_bug7() {
   local rc_on=0 rc_off=0 summary=${GITHUB_STEP_SUMMARY:-/dev/null}
   bug7_run custom-content-on true || rc_on=$?
+  stress_stop
   echo "check=bug7 pass=1 enable-custom-content=true result=$(bug7_word "$rc_on")" | tee -a "$summary"
   stop_server
   bug7_save_first_run custom-content-on
   # setup_server deletes the server dir and writes a fresh config.yml;
   # bug7_run then appends gameplay.enable-custom-content: false.
   bug7_run custom-content-off false || rc_off=$?
+  stress_stop
   echo "check=bug7 pass=2 enable-custom-content=false result=$(bug7_word "$rc_off")" | tee -a "$summary"
   # The EXIT trap in run.sh saves the second pass's logs under $ARTIFACTS/$auth.
   cp "$SERVER_DIR/plugins/Geyser-Spigot/config.yml" "$ARTIFACTS/bug7-custom-content-off/" 2>/dev/null || true

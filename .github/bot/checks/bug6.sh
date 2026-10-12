@@ -76,10 +76,20 @@ check_bug6() {
   done
   bug6_cmd_n "summon minecraft:cushion ${BUG6_CONTROL//,/ } {CustomName:\"$BUG6_PROBE\",CustomNameVisible:1b}" \
     "${LOG_PREFIX}(System chat: )?Summoned new $BUG6_PROBE" 1 || { bug6_abort "$pid" "$botlog"; return 3; }
+  # Entity stress (STRESS=1): mobs and events around the bot, kept away from
+  # the cushion spots, from here until the bot has evaluated.
+  if [ "${STRESS:-0}" = 1 ]; then
+    local centre
+    STRESS_AVOID="$BUG6_PLAIN;$BUG6_CONTROL"
+    if ! centre=$(stress_pos "${name#System chat: }") || ! stress_start mixed $centre; then
+      echo "bug6: entity stress did not start"; bug6_abort "$pid" "$botlog"; return 3
+    fi
+  fi
   # Let tracking, metadata and any extra entities reach the bot.
   sleep 8
   touch "$work/done"
   wait "$pid" || rc=$?
+  if [ "${STRESS:-0}" = 1 ]; then stress_stop; fi
   cat "$botlog"
   grep -E "${LOG_PREFIX}(System chat: )?(Summoned new |Killed |No entity was found|Unable|Unknown|Incorrect)" "$LOG" || true
 

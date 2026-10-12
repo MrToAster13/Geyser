@@ -81,6 +81,16 @@ check_bug2() {
     bug2_precondition "bot did not spawn"; return 3
   fi
 
+  # Entity stress (STRESS=1): mobs and events around the bot from here until
+  # the bot has recorded the recipe set.
+  if [ "${STRESS:-0}" = 1 ]; then
+    local centre
+    if ! centre=$(stress_pos "$name") || ! stress_start mixed $centre; then
+      bug2_stop_bot "$bot_pid"; bug2_save "$work"
+      bug2_precondition "entity stress did not start"; return 3
+    fi
+  fi
+
   # R5-b: give every recipe and confirm the result line.
   if ! cmd "recipe give $name *" \
       "${LOG_PREFIX}(System chat: )?(Unlocked [0-9]+ recipe(s|\(s\))? for|No new recipes|No player was found|Unknown or incomplete|Incorrect argument)" 30; then
@@ -104,6 +114,7 @@ check_bug2() {
   else
     wait "$bot_pid" || bot_rc=$?
   fi
+  if [ "${STRESS:-0}" = 1 ]; then stress_stop; fi
   echo "bug2: bot exit $bot_rc; bot log:"; cat "$work/bot.log"
   bug2_save "$work"
   if [ "$bot_rc" -ne 0 ] || [ ! -f "$work/bot.json" ]; then
