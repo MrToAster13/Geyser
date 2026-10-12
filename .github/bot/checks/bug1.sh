@@ -8,15 +8,17 @@
 BUG1_LINE=''
 
 # bug1_cmd <command> <ERE> [timeout s]: sends a console command and waits for
-# the ERE in latest.log lines written after the send. The matched line goes
-# to BUG1_LINE. Earlier lines never match, so repeated results like
-# "Test passed" are read per command.
+# a latest.log line, written after the send, whose message matches the ERE.
+# Paper 26.3 logs console command feedback as "System chat: <text>".
+# The matched line goes to BUG1_LINE. Earlier lines never match, so repeated
+# results like "Test passed" are read per command.
 bug1_cmd() {
-  local n i
+  local n i re
+  re="${LOG_PREFIX}(System chat: )?.*($2)"
   n=$(wc -l < "$LOG") || return 1
   send "$1" || return 1
   for ((i = 0; i < ${3:-10}; i++)); do
-    BUG1_LINE=$(tail -n +"$((n + 1))" "$LOG" | grep -E "$2" | head -n 1 || true)
+    BUG1_LINE=$(tail -n +"$((n + 1))" "$LOG" | grep -E "$re" | head -n 1 || true)
     if [ -n "$BUG1_LINE" ]; then return 0; fi
     sleep 1
   done
@@ -69,13 +71,14 @@ check_bug1() {
   (cd "$here" && BOT_NAME=Bot1 BUG1_DIR="$work" exec node bug1.js) > "$work/bot.log" 2>&1 &
   bot_pid=$!
 
-  if ! wait_log "${LOG_PREFIX}\.?Bot1 joined the game" 120; then
+  if ! wait_log "${LOG_PREFIX}(System chat: )?\.?Bot1 joined the game" 120; then
     cat "$work/bot.log"; bug1_stop_bot "$bot_pid"
     bug1_precondition "bot did not join"; return 3
   fi
   # The join line gives the exact name Paper uses (Floodgate adds a prefix).
-  name=$(grep -E "${LOG_PREFIX}\.?Bot1 joined the game" "$LOG" | head -n 1 \
-    | sed -E "s/${LOG_PREFIX}//; s/ joined the game.*//")
+  # LOG_PREFIX contains "/", so strip it with sed's "|" delimiter.
+  name=$(grep -E "${LOG_PREFIX}(System chat: )?\.?Bot1 joined the game" "$LOG" | head -n 1 \
+    | sed -E "s|${LOG_PREFIX}(System chat: )?||; s| joined the game.*||")
   echo "bug1: Paper name '$name'"
 
   if ! bug1_wait_file "$work/target" 30 "$bot_pid"; then
@@ -87,13 +90,15 @@ check_bug1() {
 
   # Precondition setup. Grass is set twice (dirt, then grass) so each setblock
   # changes the block and logs a result line, and Geyser sends update_block.
-  if ! { bug1_cmd "setblock $x $y $z minecraft:dirt" 'Changed the block|Could not set' \
-      && bug1_cmd "setblock $x $y $z minecraft:grass_block" 'Changed the block|Could not set' \
-      && bug1_cmd "item replace entity $name hotbar.0 with minecraft:iron_hoe" \
-           'Replaced a slot|No (player|entity|targets)|Unknown|<--\[HERE\]'; }; then
-    bug1_stop_bot "$bot_pid"; bug1_precondition "setup commands failed"; return 3
-  fi
-  echo "bug1: item replace -> ${BUG1_LINE#*]: }"
+  # A missing feedback line is only logged: the execute tests below check
+  # the resulting state and decide the preconditions.
+  bug1_cmd "setblock $x $y $z minecraft:dirt" 'Changed the block|Could not set|<--\[HERE\]' \
+    && echo "bug1: setblock dirt -> ${BUG1_LINE#*]: }"
+  bug1_cmd "setblock $x $y $z minecraft:grass_block" 'Changed the block|Could not set|<--\[HERE\]' \
+    && echo "bug1: setblock grass_block -> ${BUG1_LINE#*]: }"
+  bug1_cmd "item replace entity $name hotbar.0 with minecraft:iron_hoe" \
+      'Replaced|No (player|entity|targets)|Unknown|<--\[HERE\]' \
+    && echo "bug1: item replace -> ${BUG1_LINE#*]: }"
   # Dry farmland turns back to dirt on a random tick; stop random ticks so a
   # tilled block stays farmland until the test reads it. Name changed in 1.21.11.
   bug1_cmd "gamerule random_tick_speed 0" 'is now set to|Unknown|Incorrect|<--\[HERE\]' \
