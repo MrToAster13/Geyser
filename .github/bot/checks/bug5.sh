@@ -29,7 +29,7 @@ bug5_other_blocks() {
 # Paper's player name for the first bot in the join line.
 bug5_join_name() {
   grep -E "$LOG_PREFIX.*joined the game" "$LOG" | head -n 1 \
-    | sed -E "s#$LOG_PREFIX(.*) joined the game.*#\1#"
+    | sed -E "s#${LOG_PREFIX}(System chat: )?(.*) joined the game.*#\2#"
 }
 
 # Escapes ERE metacharacters so a player name matches literally.
@@ -48,12 +48,13 @@ check_bug5() {
   wait_ready || { echo "bug5: precondition not met: server not ready"; return 3; }
 
   # Precondition 1: the datapack is enabled.
-  if ! cmd "datapack list enabled" 'data pack\(s\) enabled: .*file/bug5' 15; then
+  # Paper 26.3 logs console command feedback as "System chat: <text>".
+  if ! cmd "datapack list enabled" "${LOG_PREFIX}(System chat: )?There (is|are) [0-9]+ data pack.*enabled: .*file/bug5" 15; then
     echo "bug5: precondition not met: datapack file/bug5 not enabled"
     grep -E 'data pack|datapack' "$LOG" || true
     return 3
   fi
-  grep -E 'data pack\(s\) enabled: ' "$LOG" | tail -n 1
+  grep -E 'data pack.*enabled: ' "$LOG" | tail -n 1
 
   # The bot stays long enough for the give and the inventory update.
   (cd "$here_b5/.." && BOT_NAME=Bot5 STAY_SECS=45 node join.js) &
@@ -72,13 +73,13 @@ check_bug5() {
 
   # Precondition 2: the give command's result line for that name.
   if ! cmd "give $name minecraft:enchanted_book[minecraft:stored_enchantments={\"bug5:test\":1}]" \
-      "Gave 1 .* to $name_re( |$)" 15; then
+      "${LOG_PREFIX}(System chat: )?Gave 1 .* to $name_re( |$)" 15; then
     wait "$bot_pid" || true
     echo "bug5: precondition not met: no give result line for '$name'"
     grep -E 'Gave|give|Unknown|Malformed|No player' "$LOG" | tail -n 5 || true
     return 3
   fi
-  grep -E "Gave 1 .* to $name_re( |$)" "$LOG" | tail -n 1
+  grep -E "${LOG_PREFIX}(System chat: )?Gave 1 .* to $name_re( |$)" "$LOG" | tail -n 1
 
   wait "$bot_pid" || bot_rc=$?
   echo "bug5: bot exit $bot_rc (informational, R14-a)"
