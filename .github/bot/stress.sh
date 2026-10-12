@@ -33,6 +33,7 @@ STRESS_RUN=0
 STRESS_LINE=''
 STRESS_LINE0=0
 STRESS_MODE=mixed
+STRESS_CALM_NEXT=0
 STRESS_CX='' STRESS_CY='' STRESS_CZ=''
 STRESS_XYZ=''
 STRESS_K=0
@@ -72,6 +73,15 @@ stress_pos() {
     | awk '{ v = $1 + 0; f = int(v); if (f > v) f--; p = p (NR > 1 ? " " : "") f } END { if (NR != 3) exit 1; print p }'
 }
 
+# stress_floor <number>: the block that holds a coordinate ("-7.5" gives "-8").
+stress_floor() {
+  local i=${1%%.*} f=
+  case $1 in *.*) f=${1#*.} ;; esac
+  i=$((i + 0))
+  if [ "${1:0:1}" = - ] && [ -n "${f//0/}" ]; then i=$((i - 1)); fi
+  echo "$i"
+}
+
 # stress_half <block>: the centre coordinate of a block ("-8" gives "-7.5").
 stress_half() {
   if (($1 < 0)); then echo "-$((-$1 - 1)).5"; else echo "$1.5"; fi
@@ -90,7 +100,7 @@ stress_point() {
     if [ -z "$STRESS_CX" ]; then STRESS_XYZ="~$dx ~ ~$dz"; return 0; fi
     x=$((STRESS_CX + dx)); z=$((STRESS_CZ + dz)); ok=1
     for a in ${STRESS_AVOID//;/ }; do
-      ax=${a%%,*}; az=${a##*,}; ax=${ax%%.*}; az=${az%%.*}
+      ax=$(stress_floor "${a%%,*}"); az=$(stress_floor "${a##*,}")
       if (((x - ax) * (x - ax) + (z - az) * (z - az) < 49)); then ok=0; break; fi
     done
     if [ "$ok" = 1 ]; then STRESS_XYZ="$(stress_half "$x") $STRESS_CY $(stress_half "$z")"; return 0; fi
@@ -141,7 +151,9 @@ stress_summon_at() {
 }
 
 # stress_calm: every monster gets follow_range 0, so none targets the bot.
-# It covers naturally spawned monsters and witches made by lightning.
+# It covers naturally spawned monsters. A villager turns into a witch on the
+# bolt's tick, after a calm sent with the bolt, so the loop calms again on the
+# event after a lightning event.
 stress_calm() {
   local t
   for t in zombie spider witch slime zombie_villager; do
@@ -215,7 +227,7 @@ stress_event() {
     esac
   elif ((r < 96)); then
     stress_send "execute as $m $(stress_guard 8)at @s unless entity @a[distance=..13] run summon minecraft:lightning_bolt ~ ~ ~"
-    if [ "$STRESS_MODE" = mixed ]; then stress_calm; fi
+    STRESS_CALM_NEXT=1
   else
     read -r -a types <<< "$(stress_types)"
     t=${types[RANDOM % ${#types[@]}]}
@@ -230,7 +242,10 @@ stress_loop() {
     if ((n % 20 == 0)) && ! kill -0 "$spid" 2>/dev/null; then
       echo "stress: server gone after $n events"; break
     fi
-    if [ "$STRESS_MODE" = mixed ] && ((n % 30 == 0)); then stress_calm; fi
+    if [ "$STRESS_MODE" = mixed ] && { ((n % 30 == 0)) || [ "$STRESS_CALM_NEXT" = 1 ]; }; then
+      stress_calm
+    fi
+    STRESS_CALM_NEXT=0
     stress_event
     n=$((n + 1))
     echo "$n" > "$STRESS_COUNT_FILE"
