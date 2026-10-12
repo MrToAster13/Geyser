@@ -10,16 +10,18 @@ BUG4_LINE=''
 BUG4_POS=''
 
 # bug4_cmd <command> <ERE> [timeout s]: sends a console command and waits for
-# the ERE in latest.log lines written after the send. The matched line goes
-# to BUG4_LINE.
+# the ERE (case-insensitive) in latest.log lines written after the send. The
+# matched line goes to BUG4_LINE.
 bug4_cmd() {
   local n i
   n=$(wc -l < "$LOG") || return 1
   send "$1" || return 1
-  for ((i = 0; i < ${3:-10}; i++)); do
-    BUG4_LINE=$(tail -n +"$((n + 1))" "$LOG" | grep -E "$2" | head -n 1 || true)
+  # Poll every 0.2 s: the slide must finish within the server's 400-tick
+  # sync timer, so command round trips stay short.
+  for ((i = 0; i < ${3:-10} * 5; i++)); do
+    BUG4_LINE=$(tail -n +"$((n + 1))" "$LOG" | grep -iE "$2" | head -n 1 || true)
     if [ -n "$BUG4_LINE" ]; then return 0; fi
-    sleep 1
+    sleep 0.2
   done
   echo "bug4: timeout waiting for '$2' after: $1"
   return 1
@@ -29,10 +31,10 @@ bug4_cmd() {
 bug4_pos() {
   BUG4_POS=''
   bug4_cmd "data get entity @e[tag=bug4,limit=1] Pos" \
-    'has the following entity data|No entity was found|Found no elements|<--\[HERE\]' 10 || return 1
-  case $BUG4_LINE in *'has the following entity data'*) ;; *) echo "bug4: ${BUG4_LINE#*]: }"; return 1 ;; esac
-  BUG4_POS=$(printf '%s\n' "$BUG4_LINE" | sed -E 's/.*entity data: \[([^]]*)\].*/\1/; s/[dD]//g; s/,/ /g' \
-    | awk 'NF == 3 { print $1 + 0, $2 + 0, $3 + 0 }')
+    'entity data|No entity was found|Found no elements|<--\[HERE\]' 10 || return 1
+  # The last [...] on the line is the Pos list, like [3.5d, -60.0d, 0.5d].
+  BUG4_POS=$(printf '%s\n' "$BUG4_LINE" | grep -oE '\[[^][]*[0-9][dD]\]' | tail -n 1 \
+    | sed -E 's/[][dD]//g; s/,/ /g' | awk 'NF == 3 { print $1 + 0, $2 + 0, $3 + 0 }')
   [ -n "$BUG4_POS" ] || { echo "bug4: could not parse: $BUG4_LINE"; return 1; }
   return 0
 }
@@ -108,13 +110,13 @@ check_bug4() {
   if ! bug4_put spawn "$sx $sy $sz"; then bug4_abort "bot did not read the spawn spot"; return 3; fi
   if ! bug4_cmd "summon minecraft:pig $sx $sy $sz {Tags:[\"bug4\"],PersistenceRequired:1b}" \
       'Summoned new|Unable to summon|<--\[HERE\]' \
-     || [[ $BUG4_LINE != *'Summoned new'* ]]; then
+     || [[ $BUG4_LINE != *'ummoned new'* ]]; then
     echo "bug4: summon -> ${BUG4_LINE#*]: }"; bug4_abort "summon failed"; return 3
   fi
   echo "bug4: summon -> ${BUG4_LINE#*]: }"
   if ! bug4_cmd "attribute @e[tag=bug4,limit=1] minecraft:movement_speed base set 0" \
       'Base value for attribute|not a valid entity|has no attribute|No entity was found|Unknown|<--\[HERE\]' \
-     || [[ $BUG4_LINE != *'Base value for attribute'* ]]; then
+     || [[ $BUG4_LINE != *'ase value for attribute'* ]]; then
     bug4_abort "could not set movement_speed 0: ${BUG4_LINE#*]: }"; return 3
   fi
   bug4_cmd "effect give @e[tag=bug4,limit=1] minecraft:resistance 300 4 true" \
@@ -129,7 +131,7 @@ check_bug4() {
 
   # Teleport in place so the 400-tick sync timer starts now, then baseline.
   bug4_cmd "tp @e[tag=bug4,limit=1] $sx $sy $sz" 'Teleported|No entity|<--\[HERE\]' || true
-  sleep 2
+  sleep 1.5
   if ! bug4_pos; then bug4_abort "no server position at rest"; return 3; fi
   base=$BUG4_POS
   echo "bug4: server Pos at rest $base"
@@ -138,7 +140,7 @@ check_bug4() {
   # Slide east along the ground.
   if ! bug4_put slide go; then bug4_abort "bot did not start the slide phase"; return 3; fi
   if ! bug4_cmd "data merge entity @e[tag=bug4,limit=1] {Motion:[1.5d,0.0d,0.0d]}" \
-      'Modified entity data|Nothing changed|No entity|Unable|<--\[HERE\]' 10; then
+      'System chat: |<--\[HERE\]' 10; then
     bug4_abort "Motion was not applied"; return 3
   fi
   echo "bug4: motion -> ${BUG4_LINE#*]: }"
@@ -157,7 +159,7 @@ check_bug4() {
   before="$sx $((sy + 30)) $sz"
   if ! bug4_put tp "$before"; then bug4_abort "bot did not start the fall phase"; return 3; fi
   if ! bug4_cmd "tp @e[tag=bug4,limit=1] $before" 'Teleported|No entity|<--\[HERE\]' \
-     || [[ $BUG4_LINE != *'Teleported'* ]]; then
+     || [[ $BUG4_LINE != *'eleported'* ]]; then
     bug4_abort "tp up failed"; return 3
   fi
   echo "bug4: tp -> ${BUG4_LINE#*]: }"

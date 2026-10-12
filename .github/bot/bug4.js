@@ -66,6 +66,7 @@ let self = null // our eye-level position from start_game or move_player
 const pigs = new Map() // runtime id -> rebuilt Bedrock position of every pig
 let pigId = null // runtime id of the summoned pig
 let pigAdds = 0
+const pigUnique = new Map() // runtime id -> unique id, for remove_entity
 
 // Measurement state for the current phase.
 let phase = 'setup'
@@ -89,6 +90,7 @@ client.on('add_entity', (p) => {
   if (p.entity_type !== 'minecraft:pig') return
   const id = key(p.runtime_id)
   pigs.set(id, { x: p.position.x, y: p.position.y, z: p.position.z })
+  pigUnique.set(id, key(p.unique_id))
   pigAdds++
   log(`add_entity pig runtime_id=${id} at ${fv(p.position)}`)
 })
@@ -148,7 +150,9 @@ client.on('move_entity', (p) => {
 })
 
 client.on('remove_entity', (p) => {
-  if (pigId !== null && pigs.has(pigId)) log(`remove_entity unique_id=${p.entity_id_self}`)
+  if (pigId !== null && key(p.entity_id_self) === pigUnique.get(pigId)) {
+    log(`remove_entity for the pig unique_id=${p.entity_id_self} in phase ${phase}`)
+  }
 })
 
 function waitFile (file, timeout = STEP_TIMEOUT) {
