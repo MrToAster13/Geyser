@@ -1,0 +1,297 @@
+name: Nightly merge
+
+# Merges upstream feature/26.3 into release/26.3-patched, builds the result,
+# runs every bot check from .github/bot/run.sh, then fast-forwards release.
+# Scheduled runs need the repo variable NIGHTLY_MERGE set to 'on'.
+# A manual run with dry_run true (the default) ignores that gate and never pushes.
+
+on:
+  schedule:
+    - cron: '17 4 * * *'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Do everything except the push
+        type: boolean
+        required: false
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nightly-merge
+  cancel-in-progress: false
+
+env:
+  RELEASE_BRANCH: release/26.3-patched
+
+jobs:
+  merge:
+    if: (github.event_name == 'workflow_dispatch' && github.event.inputs.dry_run != 'false') || vars.NIGHTLY_MERGE == 'on'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    outputs:
+      upstream: ${{ steps.pin.outputs.upstream }}
+      release_tip: ${{ steps.pin.outputs.release_tip }}
+      sha: ${{ steps.merge.outputs.sha }}
+      changed: ${{ steps.merge.outputs.changed }}
+      checks: ${{ steps.checks.outputs.checks }}
+    steps:
+      - name: Checkout release
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ env.RELEASE_BRANCH }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Pin upstream sha
+        id: pin
+        run: |
+          set -euo pipefail
+          git fetch --no-tags https://github.com/GeyserMC/Geyser.git \
+            +refs/heads/feature/26.3:refs/remotes/upstream/feature/26.3
+          upstream=$(git rev-parse --verify 'refs/remotes/upstream/feature/26.3^{commit}')
+          tip=$(git rev-parse --verify 'HEAD^{commit}')
+          echo "upstream=$upstream" >> "$GITHUB_OUTPUT"
+          echo "release_tip=$tip" >> "$GITHUB_OUTPUT"
+          echo "upstream feature/26.3: $upstream" | tee -a "$GITHUB_STEP_SUMMARY"
+          echo "release tip: $tip" | tee -a "$GITHUB_STEP_SUMMARY"
+
+      # R12-a and R11-b: every commit release holds beyond upstream must be a
+      # Hermes commit. A rewind or rewrite of upstream leaves upstream authors
+      # here, so this fails before the up-to-date exit below can pass.
+      - name: Check release against upstream
+        env:
+          GH_TOKEN: ${{ github.token }}
+          UPSTREAM: ${{ steps.pin.outputs.upstream }}
+          TIP: ${{ steps.pin.outputs.release_tip }}
+        run: |
+          set -euo pipefail
+          script=$(git show "$TIP:.github/scripts/push-check.sh")
+          [ -n "$script" ]
+          PUSH_CHECK_SELF_BLOB=$(git rev-parse --verify "$TIP:.github/scripts/push-check.sh")
+          export PUSH_CHECK_SELF_BLOB
+          bash -c "$script" push-check "$UPSTREAM" "$TIP" "refs/heads/$RELEASE_BRANCH" </dev/null
+
+      - name: Merge upstream
+        id: merge
+        env:
+          UPSTREAM: ${{ steps.pin.outputs.upstream }}
+          TIP: ${{ steps.pin.outputs.release_tip }}
+          GIT_AUTHOR_NAME: Hermes T3 agent
+          GIT_AUTHOR_EMAIL: 231067875+MrToAster13@users.noreply.github.com
+          GIT_COMMITTER_NAME: Hermes T3 agent
+          GIT_COMMITTER_EMAIL: 231067875+MrToAster13@users.noreply.github.com
+        run: |
+          set -euo pipefail
+          if git merge-base --is-ancestor "$UPSTREAM" "$TIP"; then
+            # R7-c: upstream has nothing new. Nothing will be pushed.
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "sha=$TIP" >> "$GITHUB_OUTPUT"
+            echo "upstream has nothing new; result is the release tip" | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          git merge --no-ff --no-edit -m "Merge upstream feature/26.3" -m "Upstream sha $UPSTREAM." "$UPSTREAM"
+          sha=$(git rev-parse --verify 'HEAD^{commit}')
+          # R7-c guard: the merge must not change anything under .github/.
+          touched=$(git diff --name-only "$TIP" "$sha" -- .github/)
+          if [ -n "$touched" ]; then
+            echo "merge changes .github files, not pushing:"; printf '%s\n' "$touched"
+            exit 1
+          fi
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "merge result: $sha" | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: List bot checks
+        id: checks
+        run: |
+          set -euo pipefail
+          # Every case label in run.sh except the catch-all is a check.
+          names=$(awk '/^case \$check in/{f=1; next} /^esac/{f=0}
+            f && /^  [A-Za-z0-9_-]+\)/{sub(/^  /, ""); sub(/\).*/, ""); print}' .github/bot/run.sh)
+          [ -n "$names" ] || { echo "no checks found in run.sh"; exit 1; }
+          json=$(printf '%s\n' "$names" | jq -Rnc '[inputs | select(length > 0)]')
+          echo "checks=$json" >> "$GITHUB_OUTPUT"
+          echo "checks: $json" | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Bundle
+        run: |
+          set -euo pipefail
+          git bundle create "$RUNNER_TEMP/x.bundle" --all
+          git bundle verify "$RUNNER_TEMP/x.bundle" > /dev/null
+
+      - name: Upload bundle
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: merge-bundle
+          path: ${{ runner.temp }}/x.bundle
+          if-no-files-found: error
+          retention-days: 7
+
+  build:
+    needs: merge
+    if: needs.merge.outputs.changed == 'true' || (github.event_name == 'workflow_dispatch' && github.event.inputs.dry_run != 'false')
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Download bundle
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: merge-bundle
+          path: ${{ runner.temp }}/bundle
+
+      - name: Checkout merge result
+        env:
+          SHA: ${{ needs.merge.outputs.sha }}
+        run: |
+          set -euo pipefail
+          git clone --no-checkout "$RUNNER_TEMP/bundle/x.bundle" geyser
+          cd geyser
+          git checkout --detach "$SHA"
+          git submodule update --init --recursive
+
+      - name: Setup Java
+        uses: actions/setup-java@1bcf9fb12cf4aa7d266a90ae39939e61372fe520 # v5.4.0
+        with:
+          distribution: temurin
+          java-version: 25
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@3f131e8634966bd73d06cc69884922b02e6faf92 # v6.2.0
+        with:
+          cache-disabled: true
+
+      - name: Build Geyser
+        working-directory: geyser
+        run: ./gradlew build
+        env:
+          BUILD_NUMBER: ${{ github.run_number }}
+
+      - name: Upload Geyser-Spigot
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: geyser-spigot
+          path: geyser/bootstrap/spigot/build/libs/Geyser-Spigot.jar
+          if-no-files-found: error
+          retention-days: 7
+
+  check:
+    needs: [merge, build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        check: ${{ fromJSON(needs.merge.outputs.checks) }}
+    steps:
+      - name: Download bundle
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: merge-bundle
+          path: ${{ runner.temp }}/bundle
+
+      - name: Checkout merge result
+        env:
+          SHA: ${{ needs.merge.outputs.sha }}
+        run: |
+          set -euo pipefail
+          git clone --no-checkout "$RUNNER_TEMP/bundle/x.bundle" geyser
+          git -C geyser checkout --detach "$SHA"
+
+      - name: Download Geyser-Spigot
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: geyser-spigot
+          path: ${{ runner.temp }}/jar
+
+      - name: Setup Java
+        uses: actions/setup-java@1bcf9fb12cf4aa7d266a90ae39939e61372fe520 # v5.4.0
+        with:
+          distribution: temurin
+          java-version: 25
+
+      - name: Setup Node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+
+      - name: Install bot client
+        working-directory: geyser/.github/bot
+        run: npm install --no-save --no-package-lock bedrock-protocol@3.60.1
+
+      - name: Run check
+        env:
+          SERVER_DIR: ${{ runner.temp }}/server
+          ARTIFACTS: ${{ runner.temp }}/bot-logs
+          CHECK: ${{ matrix.check }}
+        run: bash geyser/.github/bot/run.sh "$CHECK" "$RUNNER_TEMP/jar/Geyser-Spigot.jar"
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: bot-logs-${{ matrix.check }}
+          path: ${{ runner.temp }}/bot-logs
+          if-no-files-found: warn
+
+  # Only this job can write. A dry run can never reach it: it needs a
+  # scheduled run, or a manual run with dry_run false, and the gate on.
+  push:
+    needs: [merge, build, check]
+    if: >-
+      needs.merge.outputs.changed == 'true'
+      && vars.NIGHTLY_MERGE == 'on'
+      && (github.event_name == 'schedule'
+          || (github.event_name == 'workflow_dispatch' && github.event.inputs.dry_run == 'false'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout release
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ env.RELEASE_BRANCH }}
+          fetch-depth: 0
+
+      - name: Download bundle
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: merge-bundle
+          path: ${{ runner.temp }}/bundle
+
+      - name: Load merge result
+        env:
+          SHA: ${{ needs.merge.outputs.sha }}
+          TIP: ${{ needs.merge.outputs.release_tip }}
+        run: |
+          set -euo pipefail
+          git bundle verify "$RUNNER_TEMP/bundle/x.bundle" > /dev/null
+          git fetch --no-tags "$RUNNER_TEMP/bundle/x.bundle" \
+            "+refs/heads/$RELEASE_BRANCH:refs/nightly/merge"
+          got=$(git rev-parse --verify 'refs/nightly/merge^{commit}')
+          [ "$got" = "$SHA" ] || { echo "bundle holds $got, expected $SHA"; exit 1; }
+          git merge-base --is-ancestor "$TIP" "$SHA" || { echo "$SHA does not descend from $TIP"; exit 1; }
+          touched=$(git diff --name-only "$TIP" "$SHA" -- .github/)
+          [ -z "$touched" ] || { echo "merge changes .github files:"; printf '%s\n' "$touched"; exit 1; }
+
+      - name: Push check
+        env:
+          GH_TOKEN: ${{ github.token }}
+          UPSTREAM: ${{ needs.merge.outputs.upstream }}
+          SHA: ${{ needs.merge.outputs.sha }}
+          TIP: ${{ needs.merge.outputs.release_tip }}
+        run: |
+          set -euo pipefail
+          script=$(git show "$TIP:.github/scripts/push-check.sh")
+          [ -n "$script" ]
+          PUSH_CHECK_SELF_BLOB=$(git rev-parse --verify "$TIP:.github/scripts/push-check.sh")
+          export PUSH_CHECK_SELF_BLOB
+          bash -c "$script" push-check "$UPSTREAM" "$SHA" "refs/heads/$RELEASE_BRANCH" </dev/null
+
+      - name: Push release (fast-forward only)
+        env:
+          SHA: ${{ needs.merge.outputs.sha }}
+        run: git push origin "$SHA:refs/heads/$RELEASE_BRANCH"
