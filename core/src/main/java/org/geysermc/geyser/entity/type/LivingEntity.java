@@ -431,9 +431,10 @@ public class LivingEntity extends Entity implements Tickable {
         }
 
         if (shouldLerp() && (relX != 0 || relY != 0 || relZ != 0) && position.distanceSquared(session.getPlayerEntity().position()) < 4096) {
-            this.dirtyPitch = pitch != this.pitch;
-            this.dirtyYaw = yaw != this.yaw;
-            this.dirtyHeadYaw = headYaw != this.headYaw;
+            // Keep a rotation change from an earlier packet that the next tick has not sent yet
+            this.dirtyPitch |= pitch != this.pitch;
+            this.dirtyYaw |= yaw != this.yaw;
+            this.dirtyHeadYaw |= headYaw != this.headYaw;
 
             setYaw(yaw);
             setPitch(pitch);
@@ -443,9 +444,23 @@ public class LivingEntity extends Entity implements Tickable {
             // Lerp position should be used as base if we have lerp steps left to ensure we don't de-sync with the position provided by the server
             this.lerpPosition = lerpSteps == 0 ? this.position.add(relX, relY, relZ) : this.lerpPosition.add(relX, relY, relZ);
             this.lerpSteps = 3;
+        } else if (lerpSteps > 0 && (relX != 0 || relY != 0 || relZ != 0)) {
+            // The delta is from where the server has the entity, which is the lerp target, not the
+            // position part of the way there. Stop the lerp and move to the target plus the delta,
+            // or the rest of the lerp is lost and the next tick lerps back to the old target.
+            this.lerpSteps = 0;
+            super.moveAbsolute(this.lerpPosition.add(relX, relY, relZ), yaw, pitch, headYaw, isOnGround, false);
         } else {
             super.moveRelative(relX, relY, relZ, yaw, pitch, headYaw, isOnGround);
         }
+    }
+
+    /**
+     * @return the position the Java server has this entity at: the lerp target while lerping,
+     * otherwise the current position
+     */
+    public Vector3f lerpTarget() {
+        return lerpSteps > 0 ? lerpPosition : position;
     }
 
     @Override
@@ -463,6 +478,8 @@ public class LivingEntity extends Entity implements Tickable {
             this.lerpPosition = position;
             this.lerpSteps = 3;
         } else {
+            // A pending lerp would move the entity back toward the old target
+            this.lerpSteps = 0;
             super.moveAbsolute(position, yaw, pitch, headYaw, isOnGround, teleported);
         }
     }

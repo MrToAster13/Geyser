@@ -57,11 +57,13 @@ public class JavaTeleportEntityTranslator extends PacketTranslator<ClientboundTe
             return;
         }
 
+        // While a living entity lerps, the server has it at the lerp target, not part of the way there
+        final Vector3f serverPosition = entity instanceof LivingEntity livingEntity ? livingEntity.lerpTarget() : entity.position();
         Vector3d position = packet.getPosition();
         position = position.add(
-            packet.getRelatives().contains(PositionElement.X) ? entity.position().getX() : 0,
-            packet.getRelatives().contains(PositionElement.Y) ? entity.position().getY() : 0,
-            packet.getRelatives().contains(PositionElement.Z) ? entity.position().getZ() : 0
+            packet.getRelatives().contains(PositionElement.X) ? serverPosition.getX() : 0,
+            packet.getRelatives().contains(PositionElement.Y) ? serverPosition.getY() : 0,
+            packet.getRelatives().contains(PositionElement.Z) ? serverPosition.getZ() : 0
         );
 
         boolean hasRelative = packet.getRelatives().contains(PositionElement.X) || packet.getRelatives().contains(PositionElement.Y) || packet.getRelatives().contains(PositionElement.Z);
@@ -74,7 +76,7 @@ public class JavaTeleportEntityTranslator extends PacketTranslator<ClientboundTe
         if (!interpolate) {
             entity.teleport(position.toFloat(), newYaw, newPitch, packet.isOnGround());
         } else {
-            final Vector3d currentPosition = entity.position().toDouble();
+            final Vector3d currentPosition = serverPosition.toDouble();
             entity.moveRelative(position.getX() - currentPosition.getX(), position.getY() - currentPosition.getY(), position.getZ() - currentPosition.getZ(), newYaw, newPitch, newYaw, packet.isOnGround());
         }
 

@@ -39,14 +39,20 @@ public class JavaMoveEntityPosTranslator extends PacketTranslator<ClientboundMov
         Entity entity = session.getEntityCache().getEntityByJavaId(packet.getEntityId());
         if (entity == null) return;
 
-        // TODO lerp
-        ClientboundMoveEntityPosPacket.DeltaStep lastStep;
+        // Each step is a delta from the position the previous step ended at, so the packet moves the
+        // entity by the sum of all its steps. Using only the last step would lose the others for good,
+        // as later deltas are added on top of them.
+        double moveX = packet.getMoveX();
+        double moveY = packet.getMoveY();
+        double moveZ = packet.getMoveZ();
         if (packet.getSteps() != null) {
-            lastStep = packet.getSteps().getLast();
-        } else {
-            lastStep = new ClientboundMoveEntityPosPacket.DeltaStep(0, packet.getMoveX(), packet.getMoveY(), packet.getMoveZ());
+            for (ClientboundMoveEntityPosPacket.DeltaStep step : packet.getSteps()) {
+                moveX += step.moveX();
+                moveY += step.moveY();
+                moveZ += step.moveZ();
+            }
         }
 
-        entity.moveRelative(lastStep.moveX(), lastStep.moveY(), lastStep.moveZ(), entity.getYaw(), entity.getPitch(), entity.getHeadYaw(), packet.isOnGround());
+        entity.moveRelative(moveX, moveY, moveZ, entity.getYaw(), entity.getPitch(), entity.getHeadYaw(), packet.isOnGround());
     }
 }
