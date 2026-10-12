@@ -47,23 +47,36 @@ const client = bedrock.createClient({
 })
 
 // Record which packet ids fail to parse, so a minecraft-data gap in
-// crafting_data is told apart from a Geyser failure.
+// crafting_data is told apart from a Geyser failure. createClient builds the
+// deserializer later, in client.init() after the ping, so wrap it on assignment.
 const parseErrors = []
-const origParse = client.deserializer.parsePacketBuffer.bind(client.deserializer)
-client.deserializer.parsePacketBuffer = (buf) => {
-  try {
-    return origParse(buf)
-  } catch (e) {
-    let id = 0; let shift = 0
-    for (let i = 0; i < 5 && i < buf.length; i++) {
-      id |= (buf[i] & 0x7f) << shift
-      shift += 7
-      if (!(buf[i] & 0x80)) break
+function wrapDeserializer (des) {
+  if (!des || des.__bug2Wrapped) return des
+  const origParse = des.parsePacketBuffer.bind(des)
+  des.parsePacketBuffer = (buf) => {
+    try {
+      return origParse(buf)
+    } catch (e) {
+      let id = 0; let shift = 0
+      for (let i = 0; i < 5 && i < buf.length; i++) {
+        id |= (buf[i] & 0x7f) << shift
+        shift += 7
+        if (!(buf[i] & 0x80)) break
+      }
+      parseErrors.push({ id: id & 0x3ff, len: buf.length, msg: String(e && e.message).slice(0, 300) })
+      throw e
     }
-    parseErrors.push({ id: id & 0x3ff, len: buf.length, msg: String(e && e.message).slice(0, 300) })
-    throw e
   }
+  des.__bug2Wrapped = true
+  return des
 }
+let deserializer = wrapDeserializer(client.deserializer)
+Object.defineProperty(client, 'deserializer', {
+  configurable: true,
+  enumerable: true,
+  get () { return deserializer },
+  set (v) { deserializer = wrapDeserializer(v) }
+})
 
 const items = new Map() // network id -> name
 let itemRegistryAt = null
