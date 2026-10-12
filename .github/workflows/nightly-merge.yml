@@ -6,6 +6,9 @@ name: Nightly merge
 # A manual run with dry_run true (the default) ignores that gate and never pushes.
 
 on:
+  push:
+    branches:
+      - ci/nightly-register
   schedule:
     - cron: '17 4 * * *'
   workflow_dispatch:
