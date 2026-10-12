@@ -32,6 +32,14 @@ bug6_cmd_n() {
   return 1
 }
 
+# bug6_abort <bot pid> <bot log>: stop the bot and print what the server said.
+bug6_abort() {
+  kill "$1" 2>/dev/null; wait "$1" 2>/dev/null
+  echo "PRECONDITION bug6: setup step failed; bot log and command feedback:"
+  cat "$2"
+  grep -E "${LOG_PREFIX}System chat: " "$LOG" || true
+}
+
 check_bug6() {
   local art=${ARTIFACTS:-$PWD/bot-logs} work botlog pid rc=0 name spot i blocks
   work=$(mktemp -d) || return 3
@@ -55,25 +63,25 @@ check_bug6() {
   if ! grep -q 'bug6 bot: spawned' "$botlog"; then
     echo "PRECONDITION bug6: bot did not spawn"; cat "$botlog"; wait "$pid"; return 3
   fi
-  wait_log "$LOG_PREFIX.*joined the game" 30 || { kill "$pid"; wait "$pid"; return 3; }
+  wait_log "$LOG_PREFIX.*joined the game" 30 || { bug6_abort "$pid" "$botlog"; return 3; }
   name=$(sed -nE "s|${LOG_PREFIX}(.*) joined the game.*|\1|p" "$LOG" | tail -n1)
   echo "bug6: bot joined as '$name'"
 
   # Clear generated mobs so only the summoned cushions sit at the spots.
-  cmd 'kill @e[type=!minecraft:player]' '(Killed |No entity was found)' 15 || { kill "$pid"; wait "$pid"; return 3; }
+  cmd 'kill @e[type=!minecraft:player]' "${LOG_PREFIX}(System chat: )?(Killed |No entity was found)" 15 || { bug6_abort "$pid" "$botlog"; return 3; }
   i=0
   for spot in ${BUG6_PLAIN//;/ }; do
     i=$((i + 1))
-    bug6_cmd_n "summon minecraft:cushion ${spot//,/ }" 'Summoned new ' "$i" || { kill "$pid"; wait "$pid"; return 3; }
+    bug6_cmd_n "summon minecraft:cushion ${spot//,/ }" "${LOG_PREFIX}(System chat: )?Summoned new " "$i" || { bug6_abort "$pid" "$botlog"; return 3; }
   done
   bug6_cmd_n "summon minecraft:cushion ${BUG6_CONTROL//,/ } {CustomName:\"$BUG6_PROBE\",CustomNameVisible:1b}" \
-    "Summoned new $BUG6_PROBE" 1 || { kill "$pid"; wait "$pid"; return 3; }
+    "${LOG_PREFIX}(System chat: )?Summoned new $BUG6_PROBE" 1 || { bug6_abort "$pid" "$botlog"; return 3; }
   # Let tracking, metadata and any extra entities reach the bot.
   sleep 8
   touch "$work/done"
   wait "$pid" || rc=$?
   cat "$botlog"
-  grep -E 'Summoned new |Killed |No entity was found' "$LOG"
+  grep -E "${LOG_PREFIX}(System chat: )?(Summoned new |Killed |No entity was found|Unable|Unknown|Incorrect)" "$LOG" || true
 
   blocks=$(exception_blocks) || return 3
   if [ -n "$blocks" ]; then
