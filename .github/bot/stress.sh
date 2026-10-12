@@ -311,6 +311,7 @@ stress_start() {
   if [ "${got:-0}" -lt "$min" ]; then
     echo "stress: only ${got:-0} stress mobs alive, need $min"
     tail -n +"$((STRESS_LINE0 + 1))" "$LOG" | grep -E 'Unknown or incomplete|Incorrect argument|<--\[HERE\]|Summoned|Unable' | sort | uniq -c | sort -rn | head -n 10
+    if [ -n "$STRESS_FORCED" ]; then send 'forceload remove ~-32 ~-32 ~32 ~32' || true; STRESS_FORCED=''; fi
     return 1
   fi
 
