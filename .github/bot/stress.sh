@@ -34,6 +34,7 @@ STRESS_LINE=''
 STRESS_LINE0=0
 STRESS_MODE=mixed
 STRESS_CALM_NEXT=0
+STRESS_FORCED=''
 STRESS_CX='' STRESS_CY='' STRESS_CZ=''
 STRESS_XYZ=''
 STRESS_K=0
@@ -282,6 +283,18 @@ stress_start() {
   STRESS_COUNT_FILE="$STRESS_DIR/count-run$STRESS_RUN"
   echo 0 > "$STRESS_COUNT_FILE" || return 1
   STRESS_LINE0=$(wc -l < "$LOG") || return 1
+  # Spawn chunks do not stay loaded, so before a player joins (bug7) mobs
+  # summoned around spawn unload at once. Force-load the area instead.
+  if [ -z "$STRESS_CX" ]; then
+    stress_cmd 'forceload add ~-32 ~-32 ~32 ~32' \
+      'to be force loaded|No chunks were marked|Too many chunks|Unknown or incomplete|Incorrect argument|<--\[HERE\]' 10 \
+      || { echo "stress: no reply to forceload add"; return 1; }
+    case $STRESS_LINE in
+      *"to be force loaded"* | *"No chunks were marked"*) STRESS_FORCED=1 ;;
+      *) echo "stress: forceload add failed: ${STRESS_LINE#*]: }"; return 1 ;;
+    esac
+    sleep 2
+  fi
 
   read -r -a types <<< "$(stress_types)"
   for ((i = 0; i < STRESS_MOBS; i++)); do
@@ -327,7 +340,9 @@ stress_stop() {
   spid=$(cat "$SERVER_DIR/server.pid" 2>/dev/null) || spid=''
   if [ -n "$spid" ] && kill -0 "$spid" 2>/dev/null; then
     alive=$(stress_count "sdone$STRESS_RUN") || alive=unknown
+    if [ -n "$STRESS_FORCED" ]; then send 'forceload remove ~-32 ~-32 ~32 ~32' || true; fi
   fi
+  STRESS_FORCED=''
   new="$STRESS_DIR/log-run$STRESS_RUN.txt"
   tail -n +"$((STRESS_LINE0 + 1))" "$LOG" > "$new" 2>/dev/null || true
   parse=$(grep -cE 'Unknown or incomplete command|Incorrect argument' "$new" 2>/dev/null) || parse=0
