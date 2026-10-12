@@ -38,6 +38,8 @@ setup_server() {
 online-mode=false
 enable-rcon=false
 spawn-protection=0
+white-list=false
+enforce-whitelist=false
 level-type=minecraft\:flat
 generate-structures=false
 view-distance=4
@@ -91,6 +93,9 @@ wait_ready() {
   grep -E "$LOG_PREFIX" "$LOG" | grep -q 'Done (' \
     || { echo "prefix regex matched no Done line" >&2; return 1; }
   echo "prefix self-test ok: $(grep -cE "$LOG_PREFIX" "$LOG") prefixed lines"
+  # Paper 26.3 build 177 kicked the bot as not whitelisted even with no
+  # whitelist settings in server.properties. Turn it off at runtime too.
+  cmd 'whitelist off' "${LOG_PREFIX}Whitelist is (now|already) turned off" || return 1
 }
 
 # cmd <command> <ERE expected in latest.log> [timeout s, default 10]
