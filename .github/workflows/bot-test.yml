@@ -1,0 +1,79 @@
+name: Bot test
+
+on:
+  workflow_dispatch:
+    inputs:
+      geyser_ref:
+        description: Geyser commit to build and test (default is the dispatched ref)
+        required: false
+        default: ''
+      check:
+        description: Check to run
+        required: false
+        default: join
+
+permissions:
+  contents: read
+
+concurrency:
+  group: bot-test-${{ github.ref }}-${{ inputs.geyser_ref }}-${{ inputs.check }}
+
+jobs:
+  bot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout harness
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          path: harness
+          persist-credentials: false
+
+      - name: Checkout Geyser
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ inputs.geyser_ref || github.sha }}
+          path: geyser
+          submodules: recursive
+          persist-credentials: false
+
+      - name: Setup Java
+        uses: actions/setup-java@1bcf9fb12cf4aa7d266a90ae39939e61372fe520 # v5.4.0
+        with:
+          distribution: temurin
+          java-version: 25
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@3f131e8634966bd73d06cc69884922b02e6faf92 # v6.2.0
+        with:
+          cache-disabled: true
+
+      - name: Build Geyser-Spigot
+        working-directory: geyser
+        run: ./gradlew :spigot:build -x test
+        env:
+          BUILD_NUMBER: ${{ github.run_number }}
+
+      - name: Setup Node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+
+      - name: Install bot client
+        working-directory: harness/.github/bot
+        run: npm install --no-save --no-package-lock bedrock-protocol@3.60.1
+
+      - name: Run check
+        env:
+          SERVER_DIR: ${{ runner.temp }}/server
+          ARTIFACTS: ${{ runner.temp }}/bot-logs
+          CHECK: ${{ inputs.check || 'join' }}
+        run: bash harness/.github/bot/run.sh "$CHECK" geyser/bootstrap/spigot/build/libs/Geyser-Spigot.jar
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: bot-logs-${{ inputs.check || 'join' }}
+          path: ${{ runner.temp }}/bot-logs
+          if-no-files-found: warn
