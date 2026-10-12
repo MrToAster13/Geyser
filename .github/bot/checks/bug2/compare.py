@@ -1,21 +1,28 @@
 """Bug 2 comparison: Java crafting-table recipes from the Paper jar against the
 recipe set the Bedrock bot received (bot.json from bug2.js).
 
-Usage: python3 -I compare.py <extracted jar dir> <bot.json>
+Usage: python3 -I compare.py <extracted jar dir> <bot.json> <mappings items.json>
 Exit 0: every recipe in the subset is present and complete.
 Exit 1: at least one recipe in the subset is missing or wrong.
 Exit 3: the subset is empty or the inputs are unusable (result unverified).
 
+Java item ids are translated to Bedrock ids through Geyser's mappings
+items.json (bedrock_identifier, and bedrock_data when nonzero), because some
+Java ids name a different Bedrock item: java stone_stairs is bedrock
+normal_stone_stairs, and bedrock stone_stairs is java cobblestone_stairs.
+
 Subset (R3-f, R4-h, R5-a): crafting_shaped and crafting_shapeless recipes whose
 result has no components and whose result and every input item, after tag
-resolution through data/minecraft/tags/item, exist under the same identifier in
-the Bedrock item registry the bot received.
+resolution through data/minecraft/tags/item, have an items.json entry.
 
-A Bedrock recipe matches a Java recipe when the output name and count are equal
-and every input slot matches: an empty slot against an empty descriptor, a Java
-ingredient against a `name` descriptor naming one of its items, or a Java tag
-ingredient against an `item_tag` descriptor with the same tag id. Shaped
-recipes also match mirrored, since Java matches the mirrored pattern.
+A Bedrock recipe matches a Java recipe when the output and count are equal and
+every input slot matches: an empty slot against an empty descriptor, a Java
+ingredient against a `name` descriptor naming the mapped id of one of its
+items, or a Java tag ingredient against an `item_tag` descriptor with the same
+tag id. When the mapping has a nonzero bedrock_data and the Bedrock side
+carries a metadata value other than the 32767 wildcard, the values must be
+equal. Shaped recipes also match mirrored, since Java matches the mirrored
+pattern.
 A Java recipe is
   present   matched, and the matched Bedrock recipes together accept every
             item of every Java ingredient,
@@ -30,7 +37,40 @@ import os
 import sys
 from collections import defaultdict
 
-LIST_LIMIT = 40
+LIST_LIMIT = 20
+WILDCARD = 32767
+MAP = {}  # java id -> (bedrock id, bedrock data)
+
+
+def load_mappings(path, bed_items):
+    for k, v in load_json(path).items():
+        MAP[nid(k)] = (nid(v["bedrock_identifier"]), int(v.get("bedrock_data") or 0))
+    # Geyser's built-in custom items replace the items.json mapping when custom
+    # content is on (BuiltInMappings registers java furnace_minecart as
+    # geysermc:furnace_minecart). Use them when the bot's registry has one.
+    overrides = []
+    for k in MAP:
+        custom = "geysermc:" + k.split(":", 1)[1]
+        if custom in bed_items:
+            MAP[k] = (custom, 0)
+            overrides.append(f"{k} -> {custom}")
+    return overrides
+
+
+def bid(java_id):
+    return MAP[java_id][0] if java_id in MAP else None
+
+
+def same_item(java_id, name, meta):
+    """True when a Bedrock name and metadata are the mapping of java_id."""
+    if java_id not in MAP:
+        return False
+    b, data = MAP[java_id]
+    if name != b:
+        return False
+    if data and meta is not None and meta != WILDCARD:
+        return meta == data
+    return True
 
 
 def load_json(path):
@@ -150,7 +190,7 @@ def slot_ok(java, bed, used_tags):
         return bed["t"] == "empty"
     items, tag = java
     if bed["t"] == "name":
-        return bed["name"] in items
+        return any(same_item(i, bed["name"], bed.get("meta")) for i in items)
     if bed["t"] == "tag":
         return tag is not None and bed["tag"] == tag
     return False
@@ -163,7 +203,7 @@ def accepted(java, bed):
     items, tag = java
     if bed["t"] == "tag":
         return set(items)
-    return {bed["name"]}
+    return {i for i in items if same_item(i, bed["name"], bed.get("meta"))}
 
 
 def match_shaped(j, b):
@@ -219,22 +259,36 @@ def describe_bed(b):
     return f"{b['kind']} {shape}[{' '.join(d(x) for x in b['in'])}] -> {o.get('count')} {o.get('name')}"
 
 
-def describe_java(j):
+def describe_java(j, mapped=False):
+    """The Java recipe with Java ids, or with every item mapped to Bedrock."""
+    def one(i):
+        if not mapped:
+            return i.replace("minecraft:", "")
+        b, data = MAP.get(i, ("?", 0))
+        return b.replace("minecraft:", "") + (f":{data}" if data else "")
+
     def d(x):
         if x is None:
             return "_"
         items, tag = x
-        if tag:
+        if tag and not mapped:
             return "#" + tag.replace("minecraft:", "")
-        return "|".join(sorted(i.replace("minecraft:", "") for i in items))
+        names = sorted({one(i) for i in items})
+        return "|".join(names[:6]) + ("|..." if len(names) > 6 else "")
+    out = one(j["out"])
     if j["kind"] == "shaped":
-        return f"shaped {j['w']}x{j['h']} [{' '.join(d(x) for x in j['grid'])}] -> {j['count']} {j['out']}"
-    return f"shapeless [{' '.join(d(x) for x in j['ings'])}] -> {j['count']} {j['out']}"
+        return f"shaped {j['w']}x{j['h']} [{' '.join(d(x) for x in j['grid'])}] -> {j['count']} {out}"
+    return f"shapeless [{' '.join(d(x) for x in j['ings'])}] -> {j['count']} {out}"
 
 
 def main():
-    root, botfile = sys.argv[1], sys.argv[2]
+    root, botfile, mapfile = sys.argv[1], sys.argv[2], sys.argv[3]
     bot = load_json(botfile)
+    overrides = load_mappings(mapfile, set(bot["items"].values()))
+    print(f"bug2: items.json entries {len(MAP)}, "
+          f"java id differs from bedrock id: {sum(1 for k, v in MAP.items() if k != v[0])}, "
+          f"nonzero bedrock_data: {sum(1 for v in MAP.values() if v[1])}, "
+          f"geysermc custom item overrides: {overrides or 'none'}")
     bed_items = set(bot["items"].values())
     tags = Tags(root)
     java, skipped = java_recipes(root, tags)
@@ -259,6 +313,7 @@ def main():
         print(f"bug2: descriptor types outside name/tag/empty: {dict(other)}")
 
     subset, out_of_subset = [], defaultdict(int)
+    unmapped, not_in_registry = set(), set()
     for j in java:
         if j["error"]:
             out_of_subset["unresolvable ingredient"] += 1
@@ -272,19 +327,30 @@ def main():
         for x in ing:
             if x is not None:
                 names |= x[0]
-        if not all(n in bed_items for n in names) or any(x is not None and not x[0] for x in ing):
-            out_of_subset["identifier differs on Bedrock"] += 1
+        if any(x is not None and not x[0] for x in ing):
+            out_of_subset["empty ingredient"] += 1
+            continue
+        if not all(n in MAP for n in names):
+            out_of_subset["no items.json entry"] += 1
+            unmapped.update(n for n in names if n not in MAP)
             continue
         subset.append(j)
+        not_in_registry.update(bid(n) for n in names if bid(n) not in bed_items)
     print(f"bug2: subset compared {len(subset)} of {len(java)} "
           f"(left out: {dict(out_of_subset)})")
+    if unmapped:
+        print(f"bug2: java ids with no items.json entry: {', '.join(sorted(unmapped)[:LIST_LIMIT])}")
+    if not_in_registry:
+        print("bug2: mapped bedrock ids absent from the bot's item registry: "
+              + ", ".join(sorted(not_in_registry)[:LIST_LIMIT]))
     if not subset:
         print("bug2: subset empty, result unverified")
         return 3
 
     present, wrong, missing, excluded = [], [], [], []
     for j in subset:
-        cands = [b for b in by_out.get(j["out"], [])]
+        cands = [b for b in by_out.get(bid(j["out"]), [])
+                 if same_item(j["out"], b["out"][0]["name"], b["out"][0].get("meta"))]
         matcher = match_shaped if j["kind"] == "shaped" else match_shapeless
         cover = defaultdict(set)
         matched = 0
@@ -317,9 +383,9 @@ def main():
     for j, why in excluded[:LIST_LIMIT]:
         print(f"bug2: excluded {j['id']}: {why}")
     for j in missing[:LIST_LIMIT]:
-        print(f"bug2: missing {j['id']}: java {describe_java(j)}")
+        print(f"bug2: missing {j['id']}: java {describe_java(j)}; mapped {describe_java(j, True)}")
     for j, why, cands in wrong[:LIST_LIMIT]:
-        print(f"bug2: wrong {j['id']}: {why}; java {describe_java(j)}")
+        print(f"bug2: wrong {j['id']}: {why}; java {describe_java(j)}; mapped {describe_java(j, True)}")
         for b in cands[:3]:
             print(f"bug2:   bedrock {describe_bed(b)}")
     if len(subset) == len(excluded):
@@ -329,4 +395,12 @@ def main():
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    # A crash must not read as FAIL (exit 1): report it as unverified (3).
+    try:
+        code = main()
+    except Exception:
+        import traceback
+        traceback.print_exc()
+        print("bug2: comparison script crashed; result unverified")
+        code = 3
+    sys.exit(code)

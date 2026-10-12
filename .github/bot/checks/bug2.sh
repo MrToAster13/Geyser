@@ -26,8 +26,13 @@ bug2_save() {
 }
 
 check_bug2() {
-  local work pjar bot_pid name i rc bot_rc
+  local work pjar bot_pid name i rc bot_rc items
   work="$SERVER_DIR/bug2"
+  # The Java -> Bedrock item mapping from the mappings submodule of the
+  # checked-out Geyser tree that built $jar.
+  items="${jar%/bootstrap/*}/core/src/main/resources/mappings/items.json"
+  echo "bug2: items.json: $(ls -l "$items" 2>&1)"
+  if [ ! -s "$items" ]; then bug2_precondition "no mappings items.json at $items"; return 3; fi
   setup_server "$jar" "$auth" || { bug2_precondition "server setup failed"; return 3; }
   start_server || { bug2_precondition "server start failed"; return 3; }
   wait_ready || { bug2_precondition "server not ready"; return 3; }
@@ -121,7 +126,7 @@ if b["parseErrors"]:
 ' "$work/bot.json" || true
 
   rc=0
-  python3 -I "$here/checks/bug2/compare.py" "$work/jar" "$work/bot.json" > "$work/compare.txt" 2>&1 || rc=$?
+  python3 -I "$here/checks/bug2/compare.py" "$work/jar" "$work/bot.json" "$items" > "$work/compare.txt" 2>&1 || rc=$?
   cat "$work/compare.txt"
   bug2_save "$work"
 
