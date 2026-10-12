@@ -58,6 +58,7 @@ case $check in
       fi
     fi
     ;;
+  bug2) source "$here/checks/bug2.sh"; rc=0; check_bug2 || rc=$?; [ "$rc" -eq 0 ] && result=0 ;;
   *) echo "unknown check $check" >&2; exit 2 ;;
 esac
 
