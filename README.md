@@ -1,3 +1,8 @@
+> [!WARNING]
+> This is an unofficial fork, built by AI agents for Elijah's private Minecraft server only.
+> GeyserMC does not support it. Bedrock players on Elijah's server report bugs to Elijah, not to GeyserMC.
+> The upstream project is GeyserMC/Geyser. The MIT license below still applies.
+
 <img src="https://geysermc.org/img/geyser-1760-860.png" alt="Geyser" width="600"/>
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
