@@ -1,0 +1,15 @@
+{
+  "type": "minecraft:notice",
+  "title": {
+    "text": "Bug5 Test"
+  },
+  "action": {
+    "label": {
+      "text": "Links"
+    },
+    "action": {
+      "type": "show_dialog",
+      "dialog": "minecraft:server_links"
+    }
+  }
+}

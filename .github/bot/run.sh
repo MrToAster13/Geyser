@@ -58,6 +58,8 @@ case $check in
       fi
     fi
     ;;
+  bug5) source "$here/checks/bug5.sh"; rc=0; check_bug5 || rc=$?; [ "$rc" -eq 0 ] && result=0
+    [ "$rc" -eq 3 ] && echo "check=$check result=PRECONDITION_NOT_MET" | tee -a "${GITHUB_STEP_SUMMARY:-/dev/null}" ;;
   *) echo "unknown check $check" >&2; exit 2 ;;
 esac
 

@@ -1,0 +1,21 @@
+{
+  "anvil_cost": 1,
+  "description": {
+    "text": "Bug5 Test"
+  },
+  "exclusive_set": "minecraft:mending",
+  "max_cost": {
+    "base": 50,
+    "per_level_above_first": 0
+  },
+  "max_level": 1,
+  "min_cost": {
+    "base": 1,
+    "per_level_above_first": 0
+  },
+  "slots": [
+    "any"
+  ],
+  "supported_items": "#minecraft:enchantable/durability",
+  "weight": 1
+}
