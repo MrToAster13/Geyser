@@ -88,17 +88,20 @@ check_bug3() {
   start_server || { bug3_precondition "server start failed"; return 3; }
   wait_ready || { bug3_precondition "server not ready"; return 3; }
   mkdir -p "$work" || return 3
+  # Peaceful before the join: a slime killed the bot while it waited.
+  # Peaceful also stops the "monsters nearby" refusal of the bed.
+  bug3_cmd 'difficulty peaceful' 'difficulty (has been set|did not change)' || why+=" difficulty;"
 
   (cd "$here" && BOT_NAME=Bot1 BUG3_DIR="$work" exec node bug3.js) > "$work/bot.log" 2>&1 &
   bot_pid=$!
 
-  if ! wait_log "${LOG_PREFIX}\.?Bot1 joined the game" 120; then
+  if ! wait_log "${LOG_PREFIX}(System chat: )?\.?Bot1 joined the game" 120; then
     cat "$work/bot.log"; bug3_stop_bot "$bot_pid"
     bug3_precondition "bot did not join"; return 3
   fi
   # The join line gives the exact name Paper uses (Floodgate adds a prefix).
-  name=$(grep -E "${LOG_PREFIX}\.?Bot1 joined the game" "$LOG" | head -n 1 \
-    | sed -E "s/${LOG_PREFIX}//; s/ joined the game.*//")
+  name=$(grep -E "${LOG_PREFIX}(System chat: )?\.?Bot1 joined the game" "$LOG" | head -n 1 \
+    | sed -E "s|${LOG_PREFIX}(System chat: )?||; s| joined the game.*||")
   echo "bug3: Paper name '$name'"
 
   if ! bug3_wait_file "$work/pos" 30 "$bot_pid"; then
@@ -112,13 +115,11 @@ check_bug3() {
   hx=$((fx + 1))
   echo "bug3: bot feet $px $py $pz; bed foot $fx $fy $fz, head $hx $fy $fz (facing east)"
 
-  # Setup. Peaceful: no "monsters nearby" refusal. The sleep percentage over
-  # 100 keeps one sleeper from skipping the night and waking everyone, which
-  # would end the hold for a reason unrelated to the bug. Rule name changed in
-  # 1.21.11, so the old name is the fallback.
-  bug3_cmd 'difficulty peaceful' 'difficulty (has been set|did not change)' || why+=" difficulty;"
-  if ! bug3_cmd 'gamerule players_sleeping_percentage 101' 'is now set to: 101'; then
-    bug3_cmd 'gamerule playersSleepingPercentage 101' 'is now set to: 101' || why+=" sleep percentage gamerule;"
+  # Setup. The sleep percentage over 100 keeps one sleeper from skipping the
+  # night and waking everyone, which would end the hold for a reason unrelated
+  # to the bug. Rule name changed in 1.21.11, so the old name is the fallback.
+  if ! bug3_cmd 'gamerule players_sleeping_percentage 101' 'is now set to:? 101'; then
+    bug3_cmd 'gamerule playersSleepingPercentage 101' 'is now set to:? 101' || why+=" sleep percentage gamerule;"
   fi
   bug3_cmd 'time set 18000' 'Set the time to 18000' || why+=" time set;"
   bug3_cmd 'scoreboard objectives add bug3slept minecraft.custom:minecraft.sleep_in_bed' \
