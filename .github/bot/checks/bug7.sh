@@ -67,7 +67,8 @@ bug7_run() {
   (cd "$here" && BOT_NAME=Bot7 STAY_SECS=30 exec node bug7.js) > "$work/bot.log" 2>&1 &
   bot_pid=$!
 
-  if ! wait_log "${LOG_PREFIX}\.?Bot7 joined the game" 120; then
+  # Paper 26.3 logs the join message as "System chat: <name> joined the game".
+  if ! wait_log "${LOG_PREFIX}(System chat: )?\.?Bot7 joined the game" 120; then
     bug7_stop_bot "$bot_pid"
     echo "bug7: $label bot log:"; cat "$work/bot.log"
     blocks=$(exception_blocks) || blocks=''
@@ -78,8 +79,8 @@ bug7_run() {
     fi
     bug7_precondition "$label: bot did not join"; return 3
   fi
-  name=$(grep -m 1 -E "${LOG_PREFIX}\.?Bot7 joined the game" "$LOG" \
-    | sed -E "s|${LOG_PREFIX}||; s| joined the game.*||") || name='?'
+  name=$(grep -m 1 -E "${LOG_PREFIX}(System chat: )?\.?Bot7 joined the game" "$LOG" \
+    | sed -E "s|${LOG_PREFIX}(System chat: )?||; s| joined the game.*||") || name='?'
   echo "bug7: $label Paper name '$name'"
 
   # Evidence while the session is open: Geyser's own view of the device OS
