@@ -423,6 +423,11 @@ public class LivingEntity extends Entity implements Tickable {
 
     @Override
     public void moveRelative(double relX, double relY, double relZ, float yaw, float pitch, float headYaw, boolean isOnGround) {
+        // CONTROL ONLY (bug4crowd fault injection): lose 10% of every relative
+        // move, so the Bedrock position drifts until the next absolute sync.
+        relX *= 0.9;
+        relY *= 0.9;
+        relZ *= 0.9;
         if (this instanceof ClientVehicle clientVehicle) {
             if (clientVehicle.shouldSimulateMovement()) {
                 return;
