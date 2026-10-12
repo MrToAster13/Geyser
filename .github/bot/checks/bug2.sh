@@ -78,12 +78,12 @@ check_bug2() {
 
   # R5-b: give every recipe and confirm the result line.
   if ! cmd "recipe give $name *" \
-      "${LOG_PREFIX}(System chat: )?(Unlocked [0-9]+ recipes? for|No new recipes|No player was found|Unknown or incomplete|Incorrect argument)" 30; then
+      "${LOG_PREFIX}(System chat: )?(Unlocked [0-9]+ recipe(s|\(s\))? for|No new recipes|No player was found|Unknown or incomplete|Incorrect argument)" 30; then
     cat "$work/bot.log"; bug2_stop_bot "$bot_pid"; bug2_save "$work"
     bug2_precondition "no result line for recipe give"; return 3
   fi
   local give_line
-  give_line=$(grep -E "${LOG_PREFIX}(System chat: )?(Unlocked [0-9]+ recipes? for|No new recipes|No player was found|Unknown or incomplete|Incorrect argument)" "$LOG" | tail -n 1)
+  give_line=$(grep -E "${LOG_PREFIX}(System chat: )?(Unlocked [0-9]+ recipe(s|\(s\))? for|No new recipes|No player was found|Unknown or incomplete|Incorrect argument)" "$LOG" | tail -n 1)
   echo "bug2: recipe give -> ${give_line#*]: }"
   case $give_line in
     *Unlocked*) ;;
