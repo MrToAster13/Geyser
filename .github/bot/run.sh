@@ -39,6 +39,8 @@ save_logs() {
 }
 trap 'stress_stop; stop_server; save_logs' EXIT
 
+# Only the *stress arms below turn entity stress on.
+STRESS=0
 case $check in
   join)
     rc=0

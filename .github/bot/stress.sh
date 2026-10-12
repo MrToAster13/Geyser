@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
-# Entity stress for bot checks. Opt-in: the checks call it only when STRESS=1.
-# Source after server.sh.
+# Entity stress for bot checks. The checks call it only when STRESS=1, which
+# only the run.sh checks bug2stress, bug3stress, bug6stress and bug7stress
+# set. nightly-merge.yml runs every run.sh check, so those four gate the
+# nightly release like the plain checks. Source after server.sh.
 #
 # stress_start <mixed|passive> [x y z] summons STRESS_MOBS (default 80) mobs
 # with AI on, 4 to 18 blocks from the centre (block x y z, or the console's
@@ -11,16 +13,20 @@
 # and the failed-command counts. It is a no-op when no loop runs.
 #
 # Every stress mob carries the tag "stress" and every event selects through
-# that tag, so no event targets a player. Summons, arrows, snowballs and items
-# never appear within 4 blocks of a player, lightning never within 13.
-# STRESS_AVOID="x,y,z;x,y,z" keeps mob spawns at least 7 blocks, event summons
-# 6, lightning 8 and teleports 10 blocks from those points (bug6 cushion spots).
+# that tag, so no event targets a player. Mobs, items, arrows and snowballs
+# never appear and teleports never land within 4 blocks of a player;
+# lightning never strikes within 13. Monsters get follow_range 0.
+# STRESS_AVOID="x,y,z;x,y,z" keeps new mobs at least 7 blocks, event summons
+# 6 and lightning 8 blocks from those points (bug6 cushion spots). A short
+# teleport starts at least 12 blocks away and moves at most 4 per axis.
 # Passive mode (bug3) summons no monsters: a monster within 8 blocks of a bed
 # stops the player sleeping. Villagers stay out too, they claim beds at night.
 # Event feedback never contains "time", "tick" or "Test", which bug3 reads.
 #
 # STRESS_SEED seeds RANDOM (default: the epoch). Run k of a check uses
-# STRESS_SEED + k * 7919, so one seed reproduces every run of a check.
+# STRESS_SEED + k * 7919, so one seed reproduces the command stream of every
+# run of a check. Which mob each command hits (sort=random) and mob AI stay
+# server-side random.
 
 STRESS_PID=''
 STRESS_RUN=0
@@ -40,6 +46,8 @@ STRESS_NAMES=(Biscuit Rex Mochi Pepper Luna Ziggy 'Zoë' '名前' Nugget Olive)
 STRESS_COLORS=(red gold aqua green light_purple yellow)
 # Failure feedback from commands that parsed but did nothing.
 STRESS_FAILRE='No entity was found|Unable to |Could not |Nothing changed|does not have|[Cc]an.t |[Cc]annot |is not a |is already |failed'
+# stress_stop drops bug3's "Test failed" and Paper's "Can't keep up" lines.
+STRESS_NOTFAIL='Test failed|keep up'
 
 # stress_cmd <command> <ERE> [timeout s]: sends a console command and waits for
 # the ERE in latest.log lines written after the send. The line goes to STRESS_LINE.
@@ -64,9 +72,15 @@ stress_pos() {
     | awk '{ v = $1 + 0; f = int(v); if (f > v) f--; p = p (NR > 1 ? " " : "") f } END { if (NR != 3) exit 1; print p }'
 }
 
+# stress_half <block>: the centre coordinate of a block ("-8" gives "-7.5").
+stress_half() {
+  if (($1 < 0)); then echo "-$((-$1 - 1)).5"; else echo "$1.5"; fi
+}
+
 # stress_point: picks a spot 4 to 18 blocks from the centre, outside the
 # 7x7 square around it and at least 7 blocks from every STRESS_AVOID point.
-# Sets STRESS_XYZ to the coordinates for summon or tp.
+# Sets STRESS_XYZ to the coordinates for summon or tp; callers add an
+# "unless entity @a[distance=..4]" guard at that point.
 stress_point() {
   local try dx dz x z a ax az ok
   for ((try = 0; try < 60; try++)); do
@@ -79,7 +93,7 @@ stress_point() {
       ax=${a%%,*}; az=${a##*,}; ax=${ax%%.*}; az=${az%%.*}
       if (((x - ax) * (x - ax) + (z - az) * (z - az) < 49)); then ok=0; break; fi
     done
-    if [ "$ok" = 1 ]; then STRESS_XYZ="$x.5 $STRESS_CY $z.5"; return 0; fi
+    if [ "$ok" = 1 ]; then STRESS_XYZ="$(stress_half "$x") $STRESS_CY $(stress_half "$z")"; return 0; fi
   done
   return 1
 }
@@ -108,16 +122,26 @@ stress_types() {
 }
 
 # stress_summon_nbt <type>: the summon NBT for a stress mob of that type.
+# Monsters start with follow_range 0, so they never target the bot.
 stress_summon_nbt() {
   case $1 in
     horse) echo '{Tags:["stress"],PersistenceRequired:1b,Tame:1b}' ;;
     # A helmet keeps zombies from burning in daylight.
-    zombie) echo '{Tags:["stress"],PersistenceRequired:1b,equipment:{head:{id:"minecraft:leather_helmet",count:1}}}' ;;
+    zombie) echo '{Tags:["stress"],PersistenceRequired:1b,attributes:[{id:"minecraft:follow_range",base:0.0d}],equipment:{head:{id:"minecraft:leather_helmet",count:1}}}' ;;
+    spider) echo '{Tags:["stress"],PersistenceRequired:1b,attributes:[{id:"minecraft:follow_range",base:0.0d}]}' ;;
     *) echo '{Tags:["stress"],PersistenceRequired:1b}' ;;
   esac
 }
 
-# stress_calm: monsters get follow_range 0, so none targets the bot.
+# stress_summon_at <type>: the command that summons a stress mob at
+# STRESS_XYZ unless a player is within 4 blocks of that point.
+stress_summon_at() {
+  printf 'execute positioned %s unless entity @a[distance=..4] run summon minecraft:%s ~ ~ ~ %s' \
+    "$STRESS_XYZ" "$1" "$(stress_summon_nbt "$1")"
+}
+
+# stress_calm: every monster gets follow_range 0, so none targets the bot.
+# It covers naturally spawned monsters and witches made by lightning.
 stress_calm() {
   local t
   for t in zombie spider witch slime zombie_villager; do
@@ -136,9 +160,9 @@ stress_event() {
     stress_send "execute as $m run effect give @s minecraft:${x[RANDOM % ${#x[@]}]} $((3 + RANDOM % 6)) 0"
   elif ((r < 47)); then
     if ((RANDOM % 2)); then
-      stress_send "execute as $m $(stress_guard 10)at @s positioned ~$((RANDOM % 9 - 4)) ~ ~$((RANDOM % 9 - 4)) unless entity @a[distance=..4] run tp @s ~ ~ ~"
+      stress_send "execute as $m $(stress_guard 12)at @s positioned ~$((RANDOM % 9 - 4)) ~ ~$((RANDOM % 9 - 4)) unless entity @a[distance=..4] run tp @s ~ ~ ~"
     elif stress_point; then
-      stress_send "execute as $m run tp @s $STRESS_XYZ"
+      stress_send "execute as $m positioned $STRESS_XYZ unless entity @a[distance=..4] run tp @s ~ ~ ~"
     fi
   elif ((r < 57)); then
     stress_send 'execute as @e[tag=spick] run tag @s remove spick'
@@ -191,12 +215,11 @@ stress_event() {
     esac
   elif ((r < 96)); then
     stress_send "execute as $m $(stress_guard 8)at @s unless entity @a[distance=..13] run summon minecraft:lightning_bolt ~ ~ ~"
+    if [ "$STRESS_MODE" = mixed ]; then stress_calm; fi
   else
     read -r -a types <<< "$(stress_types)"
     t=${types[RANDOM % ${#types[@]}]}
-    if stress_point; then
-      stress_send "summon minecraft:$t $STRESS_XYZ $(stress_summon_nbt "$t")"
-    fi
+    if stress_point; then stress_send "$(stress_summon_at "$t")"; fi
   fi
 }
 
@@ -249,7 +272,7 @@ stress_start() {
   for ((i = 0; i < STRESS_MOBS; i++)); do
     t=${types[i % ${#types[@]}]}
     stress_point || continue
-    send "summon minecraft:$t $STRESS_XYZ $(stress_summon_nbt "$t")" || return 1
+    send "$(stress_summon_at "$t")" || return 1
     sleep 0.05
   done
   sleep 2
@@ -293,13 +316,13 @@ stress_stop() {
   new="$STRESS_DIR/log-run$STRESS_RUN.txt"
   tail -n +"$((STRESS_LINE0 + 1))" "$LOG" > "$new" 2>/dev/null || true
   parse=$(grep -cE 'Unknown or incomplete command|Incorrect argument' "$new" 2>/dev/null) || parse=0
-  data=$(grep -cE "$STRESS_FAILRE" "$new" 2>/dev/null) || data=0
+  data=$(grep -E "$STRESS_FAILRE" "$new" 2>/dev/null | grep -cvE "$STRESS_NOTFAIL") || data=0
   echo "stress events=${n:-0} run=$STRESS_RUN seed=$STRESS_SEED alive_at_stop=${alive:-unknown}"
   echo "stress failed_commands parse=$parse data=$data (latest.log lines since stress_start)"
   if [ "$parse" -gt 0 ] || [ "$data" -gt 0 ]; then
     echo "stress: failure lines (count, text):"
     grep -E "Unknown or incomplete command|Incorrect argument|<--\[HERE\]|$STRESS_FAILRE" "$new" \
-      | sed -E "s|${LOG_PREFIX}(System chat: )?||" | sort | uniq -c | sort -rn | head -n 20 || true
+      | grep -vE "$STRESS_NOTFAIL" | sed -E "s|${LOG_PREFIX}(System chat: )?||" | sort | uniq -c | sort -rn | head -n 20 || true
   fi
   # Feedback histogram (first three words), to check every event command ran.
   sed -nE "s|${LOG_PREFIX}System chat: ||p" "$new" | awk '{ print $1, $2, $3 }' \
