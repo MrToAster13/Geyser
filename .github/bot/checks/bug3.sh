@@ -3,10 +3,13 @@
 # to the bed head when they start sleeping; Geyser used to pass that teleport
 # on, and the Bedrock client wakes up when teleported (fixed upstream in
 # "Fix: clients being kicked out of beds because of a teleport packet").
-# Source after server.sh. check_bug3 returns 0 PASS (the bot entered the bed,
-# got no teleport and the bed is still occupied after the hold),
-# 1 FAIL (all preconditions held and the bot got a teleport or left the bed),
-# 3 precondition not met (prints which one).
+# Source after server.sh. The verdict is the first teleport Geyser handles
+# after the bed click, read from Geyser's debug log. check_bug3 returns
+# 0 PASS (Geyser skipped it as the pending bed interaction), 1 FAIL (Geyser
+# translated it to the bed head centre, which wakes a Bedrock client),
+# 3 precondition not met (prints which one). The bot's teleport count and the
+# bed state after the hold are printed as INFO only: the bot sends no movement,
+# so Java corrects its stale position with more bed teleports on every ref.
 # Uses $jar, $auth and $here from run.sh.
 
 BUG3_LINE=''
@@ -152,6 +155,9 @@ check_bug3() {
     bug3_stop_bot "$bot_pid"; bug3_precondition "$why"; return 3
   fi
 
+  # latest.log lines before the click; the verdict reads only later lines.
+  local click_line
+  click_line=$(wc -l < "$LOG") || return 3
   echo "$fx $fy $fz" > "$work/go" || return 3
   if ! bug3_wait_file "$work/used" 30 "$bot_pid"; then
     bug3_stop_bot "$bot_pid"; cat "$work/bot.log"
@@ -200,21 +206,49 @@ check_bug3() {
     echo "bug3: exception blocks in latest.log (diagnostic):"; printf '%s\n' "$blocks"
   fi
 
-  [ "$occupied" -eq 2 ] && why+=" no result for the occupied test;"
-  [ "$BUG3_BOT_RC" = 3 ] && why+=" bot-side precondition failed (see bot log);"
-  local result teleports
-  result=$(grep -E 'RESULT teleports_after_click=' "$work/bot.log" | tail -n 1 || true)
-  [ -n "$result" ] || why+=" bot printed no RESULT line (exit $BUG3_BOT_RC);"
-  if [ -n "$why" ]; then bug3_precondition "$why"; return 3; fi
-
-  teleports=$(grep -oE 'teleports_after_click=[0-9]+' <<< "$result" | cut -d= -f2)
-  rc=0
-  [ "$teleports" -gt 0 ] && rc=1
-  [ "$occupied" -ne 0 ] && rc=1
-  if [ "$rc" -eq 0 ]; then
-    echo "bug3: PASS $name stayed in the bed at $hx $fy $fz for ${BUG3_HOLD} s, no teleport after the click"
+  # Verdict: the first teleport Geyser handled after the click. Java 26.3 sends
+  # the bed teleport first (head centre, +0.6875 Y). With debug-mode Geyser
+  # logs "Teleport (id) from ..." and then either the skip line (fixed) or
+  # "to (x, y, z)" (translated to the client, which wakes the client).
+  local first
+  first=$(tail -n +"$((click_line + 1))" "$LOG" | awk '
+    /\[Geyser-Spigot\] Teleport \([0-9]+\) from / && !t { t = $0; next }
+    t && /Not translating teleport because it is to a pending bed interaction/ { print "SKIP\t" t; exit }
+    t && /\[Geyser-Spigot\] to \(/ { print "TO\t" t "\t" $0; exit }')
+  local verdict='' tid tline toline tx ty tz
+  if [ -n "$first" ]; then
+    tline=$(cut -f2 <<< "$first")
+    tid=$(grep -oE 'Teleport \([0-9]+\)' <<< "$tline" | grep -oE '[0-9]+')
+    echo "bug3: first teleport after the click: ${tline#*]: }"
+    case $first in
+      SKIP*) verdict=PASS ;;
+      TO*)
+        toline=$(cut -f3 <<< "$first")
+        echo "bug3: next Geyser line: ${toline#*]: }"
+        read -r tx ty tz < <(grep -oE 'to \([^)]*\)' <<< "$toline" | tr -d 'to(),' )
+        if awk -v x="$tx" -v y="$ty" -v z="$tz" -v bx="$hx" -v by="$fy" -v bz="$fz" 'BEGIN {
+            d = (x - bx - 0.5) ^ 2 + (y - by - 0.6875) ^ 2 + (z - bz - 0.5) ^ 2; exit !(d < 0.0001) }'; then
+          verdict=FAIL
+        else
+          why+=" first teleport after the click went to ($tx, $ty, $tz), not the bed head centre;"
+        fi ;;
+    esac
   else
-    echo "bug3: FAIL $name was kicked out of the bed: teleports_after_click=$teleports, head occupied after ${BUG3_HOLD} s: $([ "$occupied" -eq 0 ] && echo yes || echo no)"
+    why+=" no Geyser teleport debug line (skipped or translated) after the click;"
   fi
-  return "$rc"
+
+  # INFO only, never the verdict.
+  local result
+  result=$(grep -E 'RESULT teleports_after_click=' "$work/bot.log" | tail -n 1 || true)
+  echo "bug3: INFO bot: ${result:-no RESULT line} (bot exit $BUG3_BOT_RC)"
+  echo "bug3: INFO bed head occupied after ${BUG3_HOLD} s: $(case $occupied in 0) echo yes ;; 1) echo no ;; *) echo unknown ;; esac)"
+  echo "bug3: INFO first bot move_player after the click: $(grep -m1 'BEDTELEPORT' "$work/bot.log" | sed 's/^bug3-bot [^:]*: //' || true)"
+
+  if [ -n "$why" ] || [ -z "$verdict" ]; then bug3_precondition "$why"; return 3; fi
+  if [ "$verdict" = PASS ]; then
+    echo "bug3: PASS signal=geyser-debug teleport ($tid), the first after the click, was not translated: Geyser matched the pending bed interaction at $hx $fy $fz"
+    return 0
+  fi
+  echo "bug3: FAIL signal=geyser-debug teleport ($tid), the first after the click, was translated to the client: to ($tx, $ty, $tz), the bed head centre"
+  return 1
 }
