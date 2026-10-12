@@ -13,6 +13,11 @@
 //   shell writes truth   "b4mN x y z" lines, the server Pos of every mob
 //   shell writes end     -> bot writes result and exits
 // result is "PASS ...", "FAIL ..." or "PRECONDITION ...".
+// During the wander the shell sends random entity events and logs the ones
+// that move a mob at once (tp, Motion, ride, dismount) to the kicks file as
+// "b4mN epoch_ms". Mobs that ever ride another (set_entity_link) have their
+// position set by the vehicle, so the verdict leaves them out and reports
+// their drift on its own line.
 const fs = require('fs')
 const path = require('path')
 const bedrock = require('bedrock-protocol')
@@ -26,6 +31,9 @@ const LIMIT = Number(process.env.BUG4_LIMIT || 0.5)
 const MIN_MOBS = 50
 const STEP_TIMEOUT = 240 * 1000
 const NAME_RE = /^b4m\d+$/
+// A kick reaches Bedrock within: up to 1 tick until the server runs the
+// console command, the 2 ticks the check asks for, and Geyser's 3-tick lerp.
+const KICK_MS = 300
 
 if (!dir || !(LIMIT > 0)) {
   console.log(`bug4crowd-bot ${name}: FAIL bad BUG4_DIR or BUG4_LIMIT`)
@@ -64,12 +72,13 @@ const client = bedrock.createClient({
 })
 
 let self = null
-// runtime id -> { type, uid, name, pos, steps[], moves, abs, motion, post, postMoves }
+// runtime id -> { type, uid, name, pos, steps[{ s, t }], moves, abs, motion, post, postMoves, rode }
 const ents = new Map()
 const byUnique = new Map()
 let phase = 'setup'
 let removedNamed = 0
 let motionPackets = 0
+let linkPackets = 0
 
 function nameFrom (metadata) {
   for (const m of metadata || []) {
@@ -95,7 +104,8 @@ client.on('add_entity', (p) => {
     abs: 0,
     motion: 0,
     post: 0,
-    postMoves: 0
+    postMoves: 0,
+    rode: false
   }
   ents.set(id, e)
   byUnique.set(e.uid, id)
@@ -112,6 +122,15 @@ client.on('set_entity_motion', (p) => {
   if (e && e.name && phase === 'wander') { e.motion++; motionPackets++ }
 })
 
+// Link type 0 removes a link; 1 and 2 put the rider on the vehicle.
+client.on('set_entity_link', (p) => {
+  const l = p.link || {}
+  if (l.type === 0) return
+  const id = byUnique.get(key(l.rider_entity_id))
+  const e = id === undefined ? null : ents.get(id)
+  if (e && e.name) { e.rode = true; linkPackets++ }
+})
+
 function onMove (id, kind, next) {
   const e = ents.get(id)
   if (!e) return
@@ -119,7 +138,7 @@ function onMove (id, kind, next) {
   e.pos = next
   if (!e.name || step === 0) return
   if (phase === 'wander') {
-    e.steps.push(step)
+    e.steps.push({ s: step, t: Date.now() })
     e.moves++
     if (kind === 'abs') e.abs++
   } else if (phase === 'frozen') {
@@ -217,48 +236,83 @@ async function run () {
   await waitFile('end')
 
   // Drift: snapshot against server Pos, every mob type here has Bedrock offset 0.
-  const rows = []
+  const all = []
   for (const [n, s] of snap) {
     const t = truth.get(n)
     if (!t) continue
-    rows.push({ n, type: s.type, d: dist(s.pos, t), h: Math.hypot(s.pos.x - t.x, s.pos.z - t.z), shown: s.pos, t, e: s.e })
+    all.push({ n, type: s.type, d: dist(s.pos, t), h: Math.hypot(s.pos.x - t.x, s.pos.z - t.z), shown: s.pos, t, e: s.e })
   }
-  rows.sort((a, b) => b.d - a.d)
+  all.sort((a, b) => b.d - a.d)
+  const rows = all.filter((r) => !r.e.rode)
+  const riders = all.filter((r) => r.e.rode)
   const ds = rows.map((r) => r.d).sort((a, b) => a - b)
   const mean = ds.length ? ds.reduce((a, b) => a + b, 0) / ds.length : 0
   const over = rows.filter((r) => r.d > LIMIT).length
   const over01 = rows.filter((r) => r.d > 0.1).length
-  for (const r of rows.slice(0, 10)) {
-    log(`drift ${r.n} ${r.type}: Bedrock ${fv(r.shown)} server ${fv(r.t)} d=${r.d.toFixed(3)} h=${r.h.toFixed(3)} ` +
-      `moves=${r.e.moves} move_entity=${r.e.abs} post_freeze_moves=${r.e.postMoves} post_freeze_dist=${r.e.post.toFixed(3)}`)
+  const riderMax = riders.reduce((a, r) => Math.max(a, r.d), 0)
+  const riderOver = riders.filter((r) => r.d > LIMIT).length
+  for (const r of all.slice(0, 12)) {
+    log(`drift ${r.n} ${r.type}${r.e.rode ? ' (rode)' : ''}: Bedrock ${fv(r.shown)} server ${fv(r.t)} ` +
+      `d=${r.d.toFixed(3)} h=${r.h.toFixed(3)} moves=${r.e.moves} move_entity=${r.e.abs} ` +
+      `post_freeze_moves=${r.e.postMoves} post_freeze_dist=${r.e.post.toFixed(3)}`)
   }
+  log(`riders, left out of the verdict: ${riders.length}, drift max ${riderMax.toFixed(3)}, over ${LIMIT}: ${riderOver}`)
 
-  // Stutter (INFO): per mob, how often one Bedrock step is over 3x its median.
-  let steps = 0; let jumps = 0; let maxJump = 0; let maxJumpAt = ''; let moved = 0
+  // Stutter (INFO): per mob, how often one Bedrock step is over 3x its
+  // median. "all" counts every step, "excl" leaves out steps within KICK_MS
+  // after a kick of that mob, "calm" counts only mobs never kicked or ridden.
+  const kicks = new Map()
+  let kickLines = 0
+  try {
+    for (const line of fs.readFileSync(path.join(dir, 'kicks'), 'utf8').split('\n')) {
+      const [n, ms] = line.trim().split(/\s+/)
+      if (!NAME_RE.test(n || '') || !Number.isFinite(Number(ms))) continue
+      if (!kicks.has(n)) kicks.set(n, [])
+      kicks.get(n).push(Number(ms))
+      kickLines++
+    }
+  } catch (e) {}
+  const kicked = (e, t) => (kicks.get(e.name) || []).some((k) => t >= k && t <= k + KICK_MS)
+  const bucket = () => ({ steps: 0, jumps: 0, max: 0, at: '' })
+  const st = { all: bucket(), excl: bucket(), calm: bucket() }
+  const add = (b, e, m, s) => {
+    b.steps++
+    if (m >= 0.01 && s > 3 * m) b.jumps++
+    if (s > b.max) { b.max = s; b.at = `${e.name} ${e.type} median=${m.toFixed(3)}` }
+  }
+  let moved = 0
   const allNamed = [...snap.values()].map((s) => s.e)
   for (const e of allNamed) {
     if (e.moves > 0) moved++
     if (!e.steps.length) continue
-    const m = median(e.steps)
-    steps += e.steps.length
-    for (const s of e.steps) {
-      if (m >= 0.01 && s > 3 * m) jumps++
-      if (s > maxJump) { maxJump = s; maxJumpAt = `${e.name} ${e.type} median=${m.toFixed(3)}` }
+    const m = median(e.steps.map((x) => x.s))
+    const calm = !e.rode && !kicks.has(e.name)
+    for (const { s, t } of e.steps) {
+      add(st.all, e, m, s)
+      if (!kicked(e, t)) add(st.excl, e, m, s)
+      if (calm) add(st.calm, e, m, s)
     }
   }
   const postMoved = allNamed.filter((e) => e.postMoves > 0)
   const postMax = postMoved.reduce((a, e) => Math.max(a, e.post), 0)
-  log(`stutter: steps=${steps} over_3x_median=${jumps} max_jump=${maxJump.toFixed(3)} (${maxJumpAt}) set_entity_motion=${motionPackets}`)
+  for (const [k, b] of Object.entries(st)) {
+    log(`stutter ${k}: steps=${b.steps} over_3x_median=${b.jumps} max_jump=${b.max.toFixed(3)} (${b.at})`)
+  }
+  log(`kick lines ${kickLines} for ${kicks.size} mobs, window ${KICK_MS} ms; ` +
+    `set_entity_motion=${motionPackets} set_entity_link=${linkPackets}`)
   log(`after freeze: ${postMoved.length} mobs still moved on Bedrock, largest total ${postMax.toFixed(3)}`)
 
   const why = []
   if (summoned < MIN_MOBS) why.push(`server summoned ${summoned} < ${MIN_MOBS}`)
-  if (rows.length < MIN_MOBS) why.push(`only ${rows.length} mobs matched between Bedrock and server (< ${MIN_MOBS})`)
+  if (rows.length < MIN_MOBS) why.push(`only ${rows.length} non-rider mobs matched between Bedrock and server (< ${MIN_MOBS})`)
   if (moved * 2 < snap.size) why.push(`only ${moved} of ${snap.size} mobs moved on Bedrock during the wander`)
-  const metrics = `mobs_server=${summoned} mobs_bedrock=${snap.size} matched=${rows.length} moved=${moved} ` +
-    `removed=${removedNamed} drift_max=${quantile(ds, 1).toFixed(3)} drift_p95=${quantile(ds, 0.95).toFixed(3)} ` +
-    `drift_mean=${mean.toFixed(3)} over_${LIMIT}=${over} over_0.1=${over01} ` +
-    `steps=${steps} jumps_over_3x_median=${jumps} max_jump=${maxJump.toFixed(3)} post_freeze_moved=${postMoved.length} limit=${LIMIT}`
+  const metrics = `mobs_server=${summoned} mobs_bedrock=${snap.size} matched=${rows.length} riders=${riders.length} ` +
+    `moved=${moved} removed=${removedNamed} drift_max=${quantile(ds, 1).toFixed(3)} ` +
+    `drift_p95=${quantile(ds, 0.95).toFixed(3)} drift_mean=${mean.toFixed(3)} over_${LIMIT}=${over} over_0.1=${over01} ` +
+    `rider_drift_max=${riderMax.toFixed(3)} rider_over=${riderOver} ` +
+    `jumps_all=${st.all.jumps}/${st.all.steps} jumps_excl_kicks=${st.excl.jumps}/${st.excl.steps} ` +
+    `jumps_calm=${st.calm.jumps}/${st.calm.steps} max_jump_all=${st.all.max.toFixed(3)} ` +
+    `max_jump_excl=${st.excl.max.toFixed(3)} post_freeze_moved=${postMoved.length} limit=${LIMIT}`
   if (why.length) {
     writeResult(`PRECONDITION ${why.join('; ')} ${metrics}`)
     ack('end')

@@ -1,13 +1,68 @@
 #!/usr/bin/env bash
 # Bug 4, crowd variant: about 90 named mobs walk under their own AI near a
-# creative bot for 60 s. Then the server freezes and the check compares the
-# position Geyser gave the Bedrock client for every mob with the server's.
+# creative bot for 60 s while a seeded loop sends random entity events. Then
+# the server freezes and the check compares the position Geyser gave the
+# Bedrock client for every mob with the server's.
 # Source after server.sh. check_bug4crowd returns 0 PASS, 1 FAIL (some mob
 # is off by more than the limit), 3 precondition not met (prints which).
-# Uses $jar, $auth and $here from run.sh, and the helpers in bug4.sh.
+# Uses $jar, $auth and $here from run.sh, and the helpers in bug4.sh. It does
+# not use any other stress script.
 source "$here/checks/bug4.sh"
 
 BUG4C_WANDER_SECS=${BUG4C_WANDER_SECS:-60}
+# Events stop this many seconds before the freeze, so riders are dismounted
+# and short effects have run out when the positions are compared.
+BUG4C_SETTLE_SECS=6
+BUG4C_ERR_RE='Unknown or incomplete command|Incorrect argument'
+
+# bug4c_events <seconds> <mob count> <seed>: one random event every 100 to
+# 250 ms on a random b4mN mob. Events that move a mob at once (tp, Motion,
+# ride, dismount) are logged to $work/kicks as "b4mN epoch_ms" for the bot.
+# Riders come only from mobs with i % 4 == 1, so the rest never ride.
+# Writes "<total> <per-kind counts>" to $work/events.
+bug4c_events() {
+  local secs=$1 total=$2 end a b k ev=0 r
+  local -a kinds=(damage damage_by effect tp motion projectile mount dismount) cnt=(0 0 0 0 0 0 0 0)
+  local -a effects=(speed slowness jump_boost levitation)
+  local -a shots=(arrow snowball)
+  # Runs as a background job: one failed write must not end the loop.
+  set +e
+  RANDOM=$3
+  : > "$work/kicks"
+  end=$(($(date +%s%3N) + secs * 1000))
+  while (($(date +%s%3N) < end)); do
+    a="b4m$((RANDOM % total))"
+    b="b4m$((RANDOM % total))"
+    k=$((RANDOM % ${#kinds[@]}))
+    case ${kinds[k]} in
+      damage) send "damage @e[name=$a,limit=1] 1" ;;
+      damage_by) send "damage @e[name=$a,limit=1] 1 minecraft:mob_attack by @e[name=$b,limit=1]" ;;
+      effect) send "effect give @e[name=$a,limit=1] minecraft:${effects[RANDOM % 4]} 3 1 true" ;;
+      tp)
+        send "execute as @e[name=$a,limit=1] at @s run tp @s ~$((RANDOM % 7 - 3)) ~ ~$((RANDOM % 7 - 3))"
+        echo "$a $(date +%s%3N)" >> "$work/kicks" ;;
+      motion)
+        send "data merge entity @e[name=$a,limit=1] {Motion:[$(awk -v r1=$RANDOM -v r2=$RANDOM -v r3=$RANDOM \
+          'BEGIN { printf "%.2fd,%.2fd,%.2fd", (r1 % 161 - 80) / 100, (r2 % 51) / 100, (r3 % 161 - 80) / 100 }')]}"
+        echo "$a $(date +%s%3N)" >> "$work/kicks" ;;
+      projectile) send "execute at @e[name=$a,limit=1] run summon minecraft:${shots[RANDOM % 2]} ~ ~3 ~ {Motion:[0d,-1d,0d]}" ;;
+      mount)
+        r="b4m$((1 + 4 * (RANDOM % (total / 4))))"
+        [ "$r" = "$b" ] && b="b4m$(((${b#b4m} + 2) % total))"
+        send "ride @e[name=$r,limit=1] mount @e[name=$b,limit=1]"
+        echo "$r $(date +%s%3N)" >> "$work/kicks" ;;
+      dismount)
+        r="b4m$((1 + 4 * (RANDOM % (total / 4))))"
+        send "ride @e[name=$r,limit=1] dismount"
+        echo "$r $(date +%s%3N)" >> "$work/kicks" ;;
+    esac
+    ev=$((ev + 1)); cnt[k]=$((cnt[k] + 1))
+    sleep "0.$((100 + RANDOM % 151))"
+  done
+  r=''
+  for k in "${!kinds[@]}"; do r+=" ${kinds[k]}=${cnt[k]}"; done
+  echo "$ev$r" > "$work/events"
+}
 
 bug4c_precondition() {
   echo "bug4crowd: PRECONDITION not met: $*"
@@ -25,7 +80,7 @@ bug4c_abort() {
 BUG4C_MOBS='cow 12 sheep 12 pig 12 chicken 12 horse 8 villager 8 zombie 8 spider 6 rabbit 8 wolf 6'
 
 check_bug4crowd() {
-  local work bot_pid name bx by bz count n i lines got last rc bres
+  local work bot_pid name bx by bz count n i lines got last rc bres seed ev_pid errs
   work="$SERVER_DIR/bug4crowd"
   setup_server "$jar" "$auth" || { bug4c_precondition "server setup failed"; return 3; }
   start_server || { bug4c_precondition "server start failed"; return 3; }
@@ -67,7 +122,9 @@ check_bug4crowd() {
       if ((i % 3 == 0)); then tags='"b4c","b4fast"'; fi
       xz=$(awk -v i="$i" -v x="$bx" -v z="$bz" 'BEGIN { a = i * 2.39996; r = 4 + i % 10;
         printf "%.2f %.2f", x + 0.5 + r * cos(a), z + 0.5 + r * sin(a) }')
-      send "summon minecraft:$1 ${xz% *} $by ${xz#* } {Tags:[$tags],CustomName:\"b4m$i\",PersistenceRequired:1b}" || true
+      # Resistance V from the first tick: in run 1 a wolf killed a sheep
+      # before a later effect command reached it.
+      send "summon minecraft:$1 ${xz% *} $by ${xz#* } {Tags:[$tags],CustomName:\"b4m$i\",PersistenceRequired:1b,active_effects:[{id:\"minecraft:resistance\",amplifier:4b,duration:-1,show_particles:0b}]}" || true
       i=$((i + 1))
       sleep 0.05
     done
@@ -80,8 +137,9 @@ check_bug4crowd() {
   bug4_cmd "execute as @e[tag=b4fast] run attribute @s minecraft:movement_speed base set 0.4" \
     'value for attribute|has no attribute|No entity|<--\[HERE\]' && echo "bug4crowd: fast -> ${BUG4_LINE#*]: }"
   count=0
-  if bug4_cmd "execute if entity @e[tag=b4c]" 'Test passed, count: [0-9]+|Test failed|<--\[HERE\]'; then
-    count=$(printf '%s\n' "$BUG4_LINE" | grep -oE 'count: [0-9]+' | grep -oE '[0-9]+' || echo 0)
+  # Paper answers "Test passed. Count: 91".
+  if bug4_cmd "execute if entity @e[tag=b4c]" 'Test passed|Test failed|<--\[HERE\]'; then
+    count=$(printf '%s\n' "$BUG4_LINE" | grep -oiE 'count: [0-9]+' | grep -oE '[0-9]+' || echo 0)
   fi
   echo "bug4crowd: server mob count $count (summon answers: $(grep -c 'ummoned new' "$LOG" || true))"
   if [ "${count:-0}" -lt 50 ]; then
@@ -89,8 +147,20 @@ check_bug4crowd() {
   fi
 
   if ! bug4_put wander "$count"; then bug4c_abort "bot did not start the wander phase"; return 3; fi
-  echo "bug4crowd: wandering for $BUG4C_WANDER_SECS s"
-  sleep "$BUG4C_WANDER_SECS"
+  seed=${STRESS_SEED:-$(date +%s)}
+  echo "bug4crowd: wandering for $BUG4C_WANDER_SECS s, random events for $((BUG4C_WANDER_SECS - BUG4C_SETTLE_SECS)) s, STRESS_SEED=$seed"
+  n=$(wc -l < "$LOG")
+  bug4c_events "$((BUG4C_WANDER_SECS - BUG4C_SETTLE_SECS))" "$i" "$seed" &
+  ev_pid=$!
+  wait "$ev_pid" || true
+  # Riders' positions follow their vehicle, so get everyone down first.
+  send "execute as @e[tag=b4c] on passengers run ride @s dismount" || true
+  errs=$(tail -n +"$((n + 1))" "$LOG" | grep -cE "$BUG4C_ERR_RE" || true)
+  echo "bug4crowd: events sent: $(cat "$work/events" 2>/dev/null || echo none)"
+  echo "bug4crowd: in-game command errors ($BUG4C_ERR_RE): $errs"
+  tail -n +"$((n + 1))" "$LOG" | grep -A1 -E "$BUG4C_ERR_RE" | head -n 6 | sed 's/^/bug4crowd: error sample: /' || true
+  echo "bug4crowd: jump events (tp, Motion, ride) logged: $(wc -l < "$work/kicks")"
+  sleep "$BUG4C_SETTLE_SECS"
 
   if ! bug4_cmd "tick freeze" 'frozen|freeze|<--\[HERE\]|Unknown' \
      || [[ $BUG4_LINE == *HERE* || $BUG4_LINE == *nknown* ]]; then
