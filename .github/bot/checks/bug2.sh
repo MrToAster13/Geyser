@@ -51,12 +51,19 @@ check_bug2() {
   (cd "$here" && BOT_NAME=Bot1 BUG2_DIR="$work" exec node bug2.js) > "$work/bot.log" 2>&1 &
   bot_pid=$!
 
-  if ! wait_log "${LOG_PREFIX}\.?Bot1 joined the game" 120; then
+  # Paper logs the join as "System chat: .Bot1 joined the game" (floodgate
+  # prefix "."). LOG_PREFIX contains "/", so sed uses "|" as the delimiter.
+  if ! wait_log "${LOG_PREFIX}(System chat: )?\.?Bot1 joined the game" 120; then
     cat "$work/bot.log"; bug2_stop_bot "$bot_pid"; bug2_save "$work"
     bug2_precondition "bot did not join"; return 3
   fi
-  name=$(grep -E "${LOG_PREFIX}\.?Bot1 joined the game" "$LOG" | head -n 1 \
-    | sed -E "s/${LOG_PREFIX}//; s/ joined the game.*//")
+  name=$(grep -E "${LOG_PREFIX}(System chat: )?\.?Bot1 joined the game" "$LOG" | head -n 1 \
+    | sed -E "s|${LOG_PREFIX}||; s|^System chat: ||; s| joined the game.*||")
+  case $name in
+    Bot1|.Bot1) ;;
+    *) cat "$work/bot.log"; bug2_stop_bot "$bot_pid"; bug2_save "$work"
+       bug2_precondition "cannot read the Paper name from the join line ('$name')"; return 3 ;;
+  esac
   echo "bug2: Paper name '$name'"
 
   for ((i = 0; i < 60; i++)); do
