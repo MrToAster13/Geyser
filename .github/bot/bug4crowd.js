@@ -9,7 +9,12 @@
 // file, the bot reads it and answers with <name>_ok:
 //   bot writes   pos     "X Y Z" block the bot stands in
 //   shell writes wander  "<count>" mobs summoned; counting starts
-//   shell writes snap    after tick freeze; the bot snapshots every position
+//   shell writes settle  events are over and every mob has NoAI; the mobs
+//                        settle unfrozen so pending lerps, knockback and
+//                        falls finish
+//   shell writes pre     "b4mN x y z" lines, server Pos just before the freeze
+//   shell writes frozen  right after tick freeze
+//   shell writes snap    0.5 s later; the bot snapshots every position
 //   shell writes truth   "b4mN x y z" lines, the server Pos of every mob
 //   shell writes end     -> bot writes result and exits
 // result is "PASS ...", "FAIL ..." or "PRECONDITION ...".
@@ -18,6 +23,11 @@
 // "b4mN epoch_ms". Mobs that ever ride another (set_entity_link) have their
 // position set by the vehicle, so the verdict leaves them out and reports
 // their drift on its own line.
+// Geyser does not tick entity lerps while the server is frozen (neither does
+// the Java client), so a mob still moving at the freeze shows lerp lag, not
+// lasting error. The verdict leaves out every mob that moved on Bedrock in
+// the last LATE_MS before the freeze or after it, or whose server Pos changed
+// between the pre and truth reads, and reports those mobs on their own line.
 const fs = require('fs')
 const path = require('path')
 const bedrock = require('bedrock-protocol')
@@ -34,6 +44,12 @@ const NAME_RE = /^b4m\d+$/
 // A kick reaches Bedrock within: up to 1 tick until the server runs the
 // console command, the 2 ticks the check asks for, and Geyser's 3-tick lerp.
 const KICK_MS = 300
+// A Bedrock move this close before the freeze, or any after it, marks a mob
+// as still moving. Geyser's lerp sends one move per tick, so a lerp still in
+// flight at the freeze leaves a move within about 50 ms of it.
+const LATE_MS = 1000
+// Server Pos change between the pre and truth reads that counts as moving.
+const SERVER_EPS = 0.001
 
 if (!dir || !(LIMIT > 0)) {
   console.log(`bug4crowd-bot ${name}: FAIL bad BUG4_DIR or BUG4_LIMIT`)
@@ -72,13 +88,15 @@ const client = bedrock.createClient({
 })
 
 let self = null
-// runtime id -> { type, uid, name, pos, steps[{ s, t }], moves, abs, motion, post, postMoves, rode }
+// runtime id -> { type, uid, name, pos, steps[{ s, t }], moves, abs, motion,
+//   settleMoves, settleDist, lastSettleAt, post, postMoves, rode }
 const ents = new Map()
 const byUnique = new Map()
 let phase = 'setup'
 let removedNamed = 0
 let motionPackets = 0
 let linkPackets = 0
+let tFreeze = 0
 
 function nameFrom (metadata) {
   for (const m of metadata || []) {
@@ -103,6 +121,9 @@ client.on('add_entity', (p) => {
     moves: 0,
     abs: 0,
     motion: 0,
+    settleMoves: 0,
+    settleDist: 0,
+    lastSettleAt: 0,
     post: 0,
     postMoves: 0,
     rode: false
@@ -141,6 +162,10 @@ function onMove (id, kind, next) {
     e.steps.push({ s: step, t: Date.now() })
     e.moves++
     if (kind === 'abs') e.abs++
+  } else if (phase === 'settle') {
+    e.settleMoves++
+    e.settleDist += step
+    e.lastSettleAt = Date.now()
   } else if (phase === 'frozen') {
     e.post += step
     e.postMoves++
@@ -216,22 +241,41 @@ async function run () {
     Object.entries(types).map(([t, n]) => `${t}=${n}`).join(' '))
   ack('wander')
 
+  await waitFile('settle')
+  phase = 'settle'
+  const tSettle = Date.now()
+  log('settle start: events over, every mob has NoAI, server still ticking')
+  ack('settle')
+
+  const readPos = (text) => {
+    const m = new Map()
+    for (const line of text.split('\n')) {
+      const [n, x, y, z] = line.trim().split(/\s+/)
+      if (NAME_RE.test(n || '') && [x, y, z].map(Number).every(Number.isFinite)) {
+        m.set(n, { x: Number(x), y: Number(y), z: Number(z) })
+      }
+    }
+    return m
+  }
+  const pre = readPos(await waitFile('pre'))
+  log(`server Pos before the freeze for ${pre.size} mobs`)
+  ack('pre')
+
+  await waitFile('frozen')
+  phase = 'frozen'
+  tFreeze = Date.now()
+  log(`frozen after ${tFreeze - tSettle} ms of settle`)
+  ack('frozen')
+
   await waitFile('snap')
-  // The server is frozen and Geyser's 3-tick lerp has run out: these are the
-  // positions the Bedrock client shows.
+  // The server is frozen. A mob that stopped during the settle has no lerp
+  // left, so these are the positions the Bedrock client keeps showing.
   const snap = new Map()
   for (const e of named()) snap.set(e.name, { type: e.type, pos: { ...e.pos }, e })
-  phase = 'frozen'
   log(`snapshot of ${snap.size} named mobs`)
   ack('snap')
 
-  const truth = new Map()
-  for (const line of (await waitFile('truth')).split('\n')) {
-    const [n, x, y, z] = line.trim().split(/\s+/)
-    if (NAME_RE.test(n || '') && [x, y, z].map(Number).every(Number.isFinite)) {
-      truth.set(n, { x: Number(x), y: Number(y), z: Number(z) })
-    }
-  }
+  const truth = readPos(await waitFile('truth'))
   ack('truth')
   await waitFile('end')
 
@@ -240,23 +284,37 @@ async function run () {
   for (const [n, s] of snap) {
     const t = truth.get(n)
     if (!t) continue
-    all.push({ n, type: s.type, d: dist(s.pos, t), h: Math.hypot(s.pos.x - t.x, s.pos.z - t.z), shown: s.pos, t, e: s.e })
+    const p = pre.get(n)
+    const serverMove = p ? dist(p, t) : null
+    const late = s.e.lastSettleAt >= tFreeze - LATE_MS || s.e.postMoves > 0
+    const moving = late || serverMove === null || serverMove > SERVER_EPS
+    all.push({ n, type: s.type, d: dist(s.pos, t), h: Math.hypot(s.pos.x - t.x, s.pos.z - t.z), shown: s.pos, t, e: s.e, serverMove, moving })
   }
   all.sort((a, b) => b.d - a.d)
-  const rows = all.filter((r) => !r.e.rode)
   const riders = all.filter((r) => r.e.rode)
+  // Verdict rows: never rode, and at rest on both sides at the freeze.
+  const movers = all.filter((r) => !r.e.rode && r.moving)
+  const rows = all.filter((r) => !r.e.rode && !r.moving)
   const ds = rows.map((r) => r.d).sort((a, b) => a - b)
   const mean = ds.length ? ds.reduce((a, b) => a + b, 0) / ds.length : 0
   const over = rows.filter((r) => r.d > LIMIT).length
   const over01 = rows.filter((r) => r.d > 0.1).length
   const riderMax = riders.reduce((a, r) => Math.max(a, r.d), 0)
   const riderOver = riders.filter((r) => r.d > LIMIT).length
+  const moverMax = movers.reduce((a, r) => Math.max(a, r.d), 0)
+  const moverOver = movers.filter((r) => r.d > LIMIT).length
   for (const r of all.slice(0, 12)) {
-    log(`drift ${r.n} ${r.type}${r.e.rode ? ' (rode)' : ''}: Bedrock ${fv(r.shown)} server ${fv(r.t)} ` +
+    log(`drift ${r.n} ${r.type}${r.e.rode ? ' (rode)' : ''}${r.moving ? ' (moving)' : ''}: ` +
+      `Bedrock ${fv(r.shown)} server ${fv(r.t)} ` +
       `d=${r.d.toFixed(3)} h=${r.h.toFixed(3)} moves=${r.e.moves} move_entity=${r.e.abs} ` +
+      `settle_moves=${r.e.settleMoves} settle_dist=${r.e.settleDist.toFixed(3)} ` +
+      `last_settle_move=${r.e.lastSettleAt ? `${r.e.lastSettleAt - tFreeze}ms` : 'none'} ` +
+      `server_move=${r.serverMove === null ? 'no_pre' : r.serverMove.toFixed(3)} ` +
       `post_freeze_moves=${r.e.postMoves} post_freeze_dist=${r.e.post.toFixed(3)}`)
   }
   log(`riders, left out of the verdict: ${riders.length}, drift max ${riderMax.toFixed(3)}, over ${LIMIT}: ${riderOver}`)
+  log(`still moving at the freeze, left out of the verdict: ${movers.length}, drift max ${moverMax.toFixed(3)}, ` +
+    `over ${LIMIT}: ${moverOver}` + (movers.length ? ` (${movers.slice(0, 10).map((r) => r.n).join(' ')})` : ''))
 
   // Stutter (INFO): per mob, how often one Bedrock step is over 3x its
   // median. "all" counts every step, "excl" leaves out steps within KICK_MS
@@ -295,21 +353,37 @@ async function run () {
   }
   const postMoved = allNamed.filter((e) => e.postMoves > 0)
   const postMax = postMoved.reduce((a, e) => Math.max(a, e.post), 0)
+  const settleMoved = allNamed.filter((e) => e.settleMoves > 0)
+  const settleLate = allNamed.filter((e) => e.lastSettleAt >= tFreeze - LATE_MS)
+  const serverMoved = all.filter((r) => r.serverMove !== null && r.serverMove > SERVER_EPS)
+  const serverMax = serverMoved.reduce((a, r) => Math.max(a, r.serverMove), 0)
+  const noPre = all.filter((r) => r.serverMove === null).length
   for (const [k, b] of Object.entries(st)) {
     log(`stutter ${k}: steps=${b.steps} over_3x_median=${b.jumps} max_jump=${b.max.toFixed(3)} (${b.at})`)
   }
   log(`kick lines ${kickLines} for ${kicks.size} mobs, window ${KICK_MS} ms; ` +
     `set_entity_motion=${motionPackets} set_entity_link=${linkPackets}`)
+  log(`settle: ${settleMoved.length} mobs moved on Bedrock after NoAI, ` +
+    `${settleLate.length} of them in the last ${LATE_MS} ms before the freeze`)
   log(`after freeze: ${postMoved.length} mobs still moved on Bedrock, largest total ${postMax.toFixed(3)}`)
+  log(`server Pos changed across the freeze for ${serverMoved.length} mobs (largest ${serverMax.toFixed(3)}), ` +
+    `no pre read for ${noPre}`)
 
   const why = []
   if (summoned < MIN_MOBS) why.push(`server summoned ${summoned} < ${MIN_MOBS}`)
-  if (rows.length < MIN_MOBS) why.push(`only ${rows.length} non-rider mobs matched between Bedrock and server (< ${MIN_MOBS})`)
+  if (rows.length < MIN_MOBS) {
+    why.push(`only ${rows.length} settled non-rider mobs matched between Bedrock and server ` +
+      `(< ${MIN_MOBS}; ${movers.length} still moving)`)
+  }
   if (moved * 2 < snap.size) why.push(`only ${moved} of ${snap.size} mobs moved on Bedrock during the wander`)
-  const metrics = `mobs_server=${summoned} mobs_bedrock=${snap.size} matched=${rows.length} riders=${riders.length} ` +
+  const metrics = `mobs_server=${summoned} mobs_bedrock=${snap.size} matched=${all.length - riders.length} ` +
+    `settled=${rows.length} riders=${riders.length} moving=${movers.length} ` +
     `moved=${moved} removed=${removedNamed} drift_max=${quantile(ds, 1).toFixed(3)} ` +
     `drift_p95=${quantile(ds, 0.95).toFixed(3)} drift_mean=${mean.toFixed(3)} over_${LIMIT}=${over} over_0.1=${over01} ` +
     `rider_drift_max=${riderMax.toFixed(3)} rider_over=${riderOver} ` +
+    `moving_drift_max=${moverMax.toFixed(3)} moving_over=${moverOver} ` +
+    `settle_moved=${settleMoved.length} settle_moved_last_${LATE_MS}ms=${settleLate.length} ` +
+    `server_moved=${serverMoved.length} ` +
     `jumps_all=${st.all.jumps}/${st.all.steps} jumps_excl_kicks=${st.excl.jumps}/${st.excl.steps} ` +
     `jumps_calm=${st.calm.jumps}/${st.calm.steps} max_jump_all=${st.all.max.toFixed(3)} ` +
     `max_jump_excl=${st.excl.max.toFixed(3)} post_freeze_moved=${postMoved.length} limit=${LIMIT}`

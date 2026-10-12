@@ -1,8 +1,12 @@
 #!/usr/bin/env bash
 # Bug 4, crowd variant: about 90 named mobs walk under their own AI near a
-# creative bot for 60 s while a seeded loop sends random entity events. Then
-# the server freezes and the check compares the position Geyser gave the
-# Bedrock client for every mob with the server's.
+# creative bot while a seeded loop sends random entity events. Then every mob
+# gets NoAI and settles for a few seconds with the server still ticking, so
+# Geyser's 3-tick lerps, knockback and falls finish. Only then does the server
+# freeze, and the check compares the position Geyser gave the Bedrock client
+# for every mob with the server's. Geyser (like the Java client) does not
+# tick lerps while frozen, so freezing a moving crowd would measure lerp lag
+# instead of lasting position error.
 # Source after server.sh. check_bug4crowd returns 0 PASS, 1 FAIL (some mob
 # is off by more than the limit), 3 precondition not met (prints which).
 # Uses $jar, $auth and $here from run.sh, and the helpers in bug4.sh. It does
@@ -10,8 +14,9 @@
 source "$here/checks/bug4.sh"
 
 BUG4C_WANDER_SECS=${BUG4C_WANDER_SECS:-60}
-# Events stop this many seconds before the freeze, so riders are dismounted
-# and short effects have run out when the positions are compared.
+# After the events every mob gets NoAI and the server keeps ticking this many
+# seconds before the freeze, so riders are dismounted, short effects have run
+# out and every pending lerp has finished when the positions are compared.
 BUG4C_SETTLE_SECS=6
 BUG4C_ERR_RE='Unknown or incomplete command|Incorrect argument'
 
@@ -64,6 +69,26 @@ bug4c_events() {
   echo "$ev$r" > "$work/events"
 }
 
+# bug4c_read_pos <count>: server Pos of every b4c mob into BUG4C_LINES as
+# "b4mN x y z" lines and their number into BUG4C_GOT. Paper answers one line
+# per mob, "b4mN has the following entity data: [x, y, z]".
+bug4c_read_pos() {
+  local n i last=-1
+  BUG4C_LINES='' BUG4C_GOT=0
+  n=$(wc -l < "$LOG")
+  send "execute as @e[tag=b4c] run data get entity @s Pos" || true
+  for ((i = 0; i < 100; i++)); do
+    sleep 0.2
+    BUG4C_LINES=$(tail -n +"$((n + 1))" "$LOG" | grep -oE 'b4m[0-9]+ has the following entity data: \[[^]]*\]' \
+      | sed -E 's/ has the following entity data: \[/ /; s/[dD]?\]$//; s/[dD]?, / /g' \
+      | awk 'NF == 4 { printf "%s %.6f %.6f %.6f\n", $1, $2, $3, $4 }' || true)
+    BUG4C_GOT=$(printf '%s' "$BUG4C_LINES" | grep -c . || true)
+    if [ "$BUG4C_GOT" -ge "$1" ] || { [ "$BUG4C_GOT" -gt 0 ] && [ "$BUG4C_GOT" -eq "$last" ] && ((i >= 25)); }; then break; fi
+    last=$BUG4C_GOT
+  done
+  if [ "$BUG4C_GOT" -lt 50 ]; then tail -n +"$((n + 1))" "$LOG" | head -n 5; fi
+}
+
 bug4c_precondition() {
   echo "bug4crowd: PRECONDITION not met: $*"
   echo "check=bug4crowd outcome=PRECONDITION" | tee -a "${GITHUB_STEP_SUMMARY:-/dev/null}"
@@ -80,7 +105,7 @@ bug4c_abort() {
 BUG4C_MOBS='cow 12 sheep 12 pig 12 chicken 12 horse 8 villager 8 zombie 8 spider 6 rabbit 8 wolf 6'
 
 check_bug4crowd() {
-  local work bot_pid name bx by bz count n i lines got last rc bres seed ev_pid errs
+  local work bot_pid name bx by bz count n i lines got rc bres seed ev_pid errs
   work="$SERVER_DIR/bug4crowd"
   setup_server "$jar" "$auth" || { bug4c_precondition "server setup failed"; return 3; }
   start_server || { bug4c_precondition "server start failed"; return 3; }
@@ -160,36 +185,43 @@ check_bug4crowd() {
   echo "bug4crowd: in-game command errors ($BUG4C_ERR_RE): $errs"
   tail -n +"$((n + 1))" "$LOG" | grep -A1 -E "$BUG4C_ERR_RE" | head -n 6 | sed 's/^/bug4crowd: error sample: /' || true
   echo "bug4crowd: jump events (tp, Motion, ride) logged: $(wc -l < "$work/kicks")"
+
+  # Stop every mob, then let the server keep ticking so pending lerps,
+  # knockback and falls finish before the freeze.
+  n=$(wc -l < "$LOG")
+  if ! bug4_cmd "execute as @e[tag=b4c] run data merge entity @s {NoAI:1b}" \
+     'Modified entity data|Nothing changed|No entity|Unable|<--\[HERE\]' \
+     || [[ $BUG4_LINE == *HERE* || $BUG4_LINE == *'No entity'* || $BUG4_LINE == *Unable* ]]; then
+    bug4c_abort "NoAI failed: ${BUG4_LINE#*]: }"; return 3
+  fi
+  sleep 0.5
+  echo "bug4crowd: NoAI set on $(tail -n +"$((n + 1))" "$LOG" | grep -c 'Modified entity data' || true) mobs" \
+    "(first answer: ${BUG4_LINE#*]: })"
+  if ! bug4_put settle go; then bug4c_abort "bot did not start the settle phase"; return 3; fi
+  echo "bug4crowd: settling unfrozen for $BUG4C_SETTLE_SECS s"
   sleep "$BUG4C_SETTLE_SECS"
+
+  # Server Pos just before the freeze; the bot compares it with the frozen
+  # Pos to find mobs the server still moved.
+  bug4c_read_pos "$count"
+  echo "bug4crowd: server positions before the freeze read for $BUG4C_GOT of $count mobs"
+  if [ "$BUG4C_GOT" -lt 50 ]; then bug4c_abort "pre-freeze server positions for only $BUG4C_GOT mobs"; return 3; fi
+  if ! bug4_put pre "$BUG4C_LINES"; then bug4c_abort "bot did not read the pre-freeze positions"; return 3; fi
 
   if ! bug4_cmd "tick freeze" 'frozen|freeze|<--\[HERE\]|Unknown' \
      || [[ $BUG4_LINE == *HERE* || $BUG4_LINE == *nknown* ]]; then
     bug4c_abort "tick freeze failed: ${BUG4_LINE#*]: }"; return 3
   fi
   echo "bug4crowd: freeze -> ${BUG4_LINE#*]: }"
-  # Geyser lerps each Java move over 3 ticks (150 ms); give it 0.5 s.
+  if ! bug4_put frozen go; then bug4c_abort "bot did not note the freeze"; return 3; fi
   sleep 0.5
   if ! bug4_put snap go; then bug4c_abort "bot did not take the snapshot"; return 3; fi
 
-  # Server Pos of every mob: one line per mob, "b4mN has the following entity data: [x, y, z]".
-  n=$(wc -l < "$LOG")
-  send "execute as @e[tag=b4c] run data get entity @s Pos" || true
-  last=-1
-  for ((i = 0; i < 100; i++)); do
-    sleep 0.2
-    lines=$(tail -n +"$((n + 1))" "$LOG" | grep -oE 'b4m[0-9]+ has the following entity data: \[[^]]*\]' \
-      | sed -E 's/ has the following entity data: \[/ /; s/[dD]?\]$//; s/[dD]?, / /g' \
-      | awk 'NF == 4 { printf "%s %.6f %.6f %.6f\n", $1, $2, $3, $4 }' || true)
-    got=$(printf '%s' "$lines" | grep -c . || true)
-    if [ "$got" -ge "$count" ] || { [ "$got" -gt 0 ] && [ "$got" -eq "$last" ] && ((i >= 25)); }; then break; fi
-    last=$got
-  done
+  bug4c_read_pos "$count"
+  got=$BUG4C_GOT lines=$BUG4C_LINES
   echo "bug4crowd: server positions read for $got of $count mobs"
   printf '%s\n' "$lines" | head -n 3 | sed 's/^/bug4crowd: server Pos /'
-  if [ "$got" -lt 50 ]; then
-    tail -n +"$((n + 1))" "$LOG" | head -n 5
-    bug4c_abort "server positions for only $got mobs"; return 3
-  fi
+  if [ "$got" -lt 50 ]; then bug4c_abort "server positions for only $got mobs"; return 3; fi
   if ! bug4_put truth "$lines"; then bug4c_abort "bot did not read the server positions"; return 3; fi
 
   bug4_put end go || true
@@ -205,8 +237,8 @@ check_bug4crowd() {
   bres=$(cat "$work/result" 2>/dev/null || true)
   echo "bug4crowd: bot result: ${bres:-none}"
   case $bres in
-    PASS*) rc=0; echo "bug4crowd: PASS every mob's Bedrock position matched the server's: ${bres#PASS }" ;;
-    FAIL*) rc=1; echo "bug4crowd: FAIL some mob's Bedrock position was off by more than the limit: ${bres#FAIL }" ;;
+    PASS*) rc=0; echo "bug4crowd: PASS every settled mob's Bedrock position matched the server's: ${bres#PASS }" ;;
+    FAIL*) rc=1; echo "bug4crowd: FAIL some settled mob's Bedrock position was off by more than the limit: ${bres#FAIL }" ;;
     *) rc=3; bug4c_precondition "bot gave no result (${bres:-none})" ;;
   esac
   return "$rc"
