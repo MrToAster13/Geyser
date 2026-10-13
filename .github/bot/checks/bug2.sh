@@ -3,7 +3,7 @@
 # Source after server.sh. check_bug2 returns 0 PASS (every subset recipe
 # present and complete), 1 FAIL (a subset recipe is missing or wrong),
 # 3 precondition not met or result unverified (prints why).
-# Uses $jar, $auth and $here from run.sh.
+# Uses $jar, $auth and $here from run.sh, and BUG2_ITEMS when set.
 # Recipes and item tags come from versions/26.3/paper-26.3.jar after the
 # first boot (R3-f, R4-h); the bot side is bug2.js; the comparison is
 # checks/bug2/compare.py. The slowness half is a timing proxy only (D2).
@@ -29,8 +29,11 @@ check_bug2() {
   local work pjar bot_pid name i rc bot_rc items
   work="$SERVER_DIR/bug2"
   # The Java -> Bedrock item mapping from the mappings submodule of the
-  # checked-out Geyser tree that built $jar.
-  items="${jar%/bootstrap/*}/core/src/main/resources/mappings/items.json"
+  # Geyser tree that built $jar. BUG2_ITEMS names it directly (the nightly
+  # check job downloads the jar outside the tree). Otherwise bot-test.yml's
+  # in-tree jar path gives the tree; a jar outside any bootstrap/ tree leaves
+  # a path inside the jar, which the -s test below rejects.
+  items="${BUG2_ITEMS:-${jar%/bootstrap/*}/core/src/main/resources/mappings/items.json}"
   echo "bug2: items.json: $(ls -l "$items" 2>&1)"
   if [ ! -s "$items" ]; then bug2_precondition "no mappings items.json at $items"; return 3; fi
   setup_server "$jar" "$auth" || { bug2_precondition "server setup failed"; return 3; }
@@ -91,19 +94,28 @@ check_bug2() {
     fi
   fi
 
-  # R5-b: give every recipe and confirm the result line.
-  if ! cmd "recipe give $name *" \
-      "${LOG_PREFIX}(System chat: )?(Unlocked [0-9]+ recipe(s|\(s\))? for|No new recipes|No player was found|Unknown or incomplete|Incorrect argument)" 30; then
+  # R5-b: give every recipe and confirm the result line. Only lines written
+  # after the send count, and only the unlock line for this player: stress
+  # commands share the console and log their own feedback meanwhile.
+  local give_line give_n
+  give_n=$(wc -l < "$LOG") || { bug2_stop_bot "$bot_pid"; bug2_precondition "cannot read $LOG"; return 3; }
+  send "recipe give $name *" || { bug2_stop_bot "$bot_pid"; bug2_precondition "cannot send recipe give"; return 3; }
+  give_line=''
+  for ((i = 0; i < 30; i++)); do
+    give_line=$(tail -n +"$((give_n + 1))" "$LOG" \
+      | grep -E "${LOG_PREFIX}(System chat: )?Unlocked [0-9]+ recipe(s|\(s\))? for \.?Bot1([^A-Za-z0-9_]|$)" \
+      | head -n 1 || true)
+    [ -n "$give_line" ] && break
+    sleep 1
+  done
+  if [ -z "$give_line" ]; then
+    echo "bug2: command feedback logged after recipe give:"
+    tail -n +"$((give_n + 1))" "$LOG" | grep -E "${LOG_PREFIX}(System chat: )?(Unlocked|No new recipes|No player was found|Unknown or incomplete|Incorrect argument)" \
+      | head -n 10 || true
     cat "$work/bot.log"; bug2_stop_bot "$bot_pid"; bug2_save "$work"
-    bug2_precondition "no result line for recipe give"; return 3
+    bug2_precondition "no unlock line for $name within 30 s of recipe give"; return 3
   fi
-  local give_line
-  give_line=$(grep -E "${LOG_PREFIX}(System chat: )?(Unlocked [0-9]+ recipe(s|\(s\))? for|No new recipes|No player was found|Unknown or incomplete|Incorrect argument)" "$LOG" | tail -n 1)
   echo "bug2: recipe give -> ${give_line#*]: }"
-  case $give_line in
-    *Unlocked*) ;;
-    *) bug2_stop_bot "$bot_pid"; bug2_save "$work"; bug2_precondition "recipe give did not unlock recipes"; return 3 ;;
-  esac
   touch "$work/given" || return 3
 
   # The bot ends 10 s after the last crafting_data, at most 90 s after `given`.
