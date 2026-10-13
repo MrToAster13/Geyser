@@ -182,7 +182,7 @@ stress_event() {
     stress_send "execute as $m run damage @s $((1 + RANDOM % 3)) ${x[RANDOM % 2]}"
   elif ((r < 32)); then
     x=(speed slowness glowing invisibility jump_boost resistance fire_resistance levitation weakness strength slow_falling)
-    stress_send "execute as $m run effect give @s minecraft:${x[RANDOM % ${#x[@]}]} $((3 + RANDOM % 6)) 0"
+    stress_send "execute as $m run effect gives @s minecraft:${x[RANDOM % ${#x[@]}]} $((3 + RANDOM % 6)) 0"
   elif ((r < 47)); then
     if ((RANDOM % 2)); then
       stress_send "execute as $m $(stress_guard 12)at @s positioned ~$((RANDOM % 9 - 4)) ~ ~$((RANDOM % 9 - 4)) unless entity @a[distance=..4] run tp @s ~ ~ ~"
