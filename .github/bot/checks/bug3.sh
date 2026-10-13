@@ -14,16 +14,21 @@
 
 BUG3_LINE=''
 BUG3_HOLD=${BUG3_HOLD:-20}
-# Command errors that end a wait early; the caller reads BUG3_LINE.
-BUG3_ERR='Unknown or incomplete command|Incorrect argument|<--\[HERE\]'
+# Paper 26.3 logs console command feedback as an INFO "System chat: " line.
+# WARN lines (such as "Can't keep up! ... N ticks behind") never match.
+BUG3_REPLY='^\[[0-9]{2}:[0-9]{2}:[0-9]{2}\] \[[^]]*/INFO\]: System chat: '
+# Command errors that end a wait early; the caller reads BUG3_LINE. Brigadier
+# follows a parse error with an unprefixed "...command<--[HERE]" line.
+BUG3_ERR="${BUG3_REPLY}(Unknown or incomplete command|Incorrect argument|Can.t find element)|^[^[].*<--\[HERE\]"
+# The time query that works on this server, found by bug3_night's first call.
+BUG3_TIME_Q=''
 
 # bug3_cmd <command> <ERE> [timeout s]: sends a console command and waits for
-# the ERE, anywhere after the latest.log prefix (and "System chat: "), in
-# lines written after the send, or for a command error. The matched line goes
-# to BUG3_LINE. Earlier lines never match, so repeated results are read per
-# command.
+# the ERE in a command reply (BUG3_REPLY) written after the send, or for a
+# command error. The matched line goes to BUG3_LINE. Earlier lines never
+# match, so repeated results are read per command.
 bug3_cmd() {
-  local n i re="${LOG_PREFIX}(System chat: )?.*($2)|$BUG3_ERR"
+  local n i re="${BUG3_REPLY}.*($2)|$BUG3_ERR"
   n=$(wc -l < "$LOG") || return 1
   send "$1" || return 1
   for ((i = 0; i < ${3:-10}; i++)); do
@@ -75,15 +80,33 @@ bug3_stop_bot() {
 }
 
 # bug3_night: 0 when the day time is in the sleepable night window, 1 when it
-# is not, 2 when the query gave no readable time. Paper 26.3 reworded the time
-# feedback ("Set minecraft:overworld to N tick(s)"), so the query result is
-# read as the last number in the first time or tick line after the send.
+# is not, 2 when no query gave a readable time. Paper 26.3 (26.1 world clocks)
+# has no "time query daytime": it fails with "Can't find element
+# 'minecraft:daytime' of type 'minecraft:timeline'". The first call, before
+# entity stress starts, tries "time query time" (the default clock), then the
+# pre-26.1 "time query daytime", and keeps the first that answers; later calls
+# send only that one, so a failing query never lands in the stress window.
+# The reply format of "time query time" is not pinned down, so the time is
+# the number before " tick" when there is one, else the last number, modulo
+# one 24000-tick day.
 bug3_night() {
-  local t
-  bug3_cmd 'time query daytime' '(time|tick)[^0-9]*[0-9]+|[0-9]+ tick' 10 || return 2
-  t=$(grep -oE '[0-9]+' <<< "${BUG3_LINE#*]: }" | tail -n 1)
+  local t q qs
+  if [ -n "$BUG3_TIME_Q" ]; then qs=$BUG3_TIME_Q
+  elif [ -z "${BUG3_TIME_TRIED:-}" ]; then BUG3_TIME_TRIED=1; qs='time query time|time query daytime'
+  else return 2
+  fi
+  t=''
+  while [ -n "$qs" ]; do
+    q=${qs%%|*}
+    if [ "$qs" = "$q" ]; then qs=''; else qs=${qs#*|}; fi
+    bug3_cmd "$q" '([Tt]ime|[Tt]ick)[^0-9]*[0-9]+|[0-9]+ tick' 10 || continue
+    t=$(grep -oE '[0-9]+ tick' <<< "${BUG3_LINE#*System chat: }" | grep -oE '[0-9]+' | tail -n 1)
+    [ -n "$t" ] || t=$(grep -oE '[0-9]+' <<< "${BUG3_LINE#*System chat: }" | tail -n 1)
+    if [ -n "$t" ]; then BUG3_TIME_Q=$q; break; fi
+  done
   [ -n "$t" ] || return 2
-  echo "bug3: day time $t"
+  t=$((10#$t % 24000))
+  echo "bug3: day time $t (from '$BUG3_TIME_Q')"
   [ "$t" -ge 13000 ] && [ "$t" -lt 23000 ]
 }
 
@@ -251,6 +274,8 @@ check_bug3() {
   echo "bug3: INFO bed head occupied after ${BUG3_HOLD} s: $(case $occupied in 0) echo yes ;; 1) echo no ;; *) echo unknown ;; esac)"
   echo "bug3: INFO first bot move_player after the click: $(grep -m1 'BEDTELEPORT' "$work/bot.log" | sed 's/^bug3-bot [^:]*: //' || true)"
 
+  # Entity stress that did not do its job voids a PASS; a FAIL stands.
+  if [ "$verdict" = PASS ] && ! stress_ok; then why+=" $STRESS_BAD;"; fi
   if [ -n "$why" ] || [ -z "$verdict" ]; then bug3_precondition "$why"; return 3; fi
   if [ "$verdict" = PASS ]; then
     echo "bug3: PASS signal=geyser-debug teleport ($tid), the first after the click, was not translated: Geyser matched the pending bed interaction at $hx $fy $fz"

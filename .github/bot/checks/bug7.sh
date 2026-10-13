@@ -5,8 +5,10 @@
 # This runs twice: Geyser defaults, then gameplay.enable-custom-content false.
 # Each pass writes its own result line to the step summary. check_bug7
 # returns 0 only when both passes are clean, 1 when either pass logs a
-# server-side exception block or the server drops the spawned bot, and 3
-# when a precondition does not hold (prints which one). The outcome stays
+# server-side exception block or the bot exits non-zero after it spawned
+# (for any reason: a server kick or disconnect, or a client-side error such
+# as a bedrock-protocol parse failure in the bot; the bot log tells which),
+# and 3 when a precondition does not hold (prints which one). The outcome stays
 # unverified either way: client crashes cannot be observed from here.
 # Uses $jar, $auth, $here and $ARTIFACTS from run.sh.
 
@@ -146,6 +148,8 @@ check_bug7() {
   local rc_on=0 rc_off=0 summary=${GITHUB_STEP_SUMMARY:-/dev/null}
   bug7_run custom-content-on true || rc_on=$?
   stress_stop
+  # Entity stress that did not do its job voids a clean pass; a FAIL stands.
+  if [ "$rc_on" -eq 0 ] && ! stress_ok; then bug7_precondition "custom-content-on: $STRESS_BAD"; rc_on=3; fi
   echo "check=bug7 pass=1 enable-custom-content=true result=$(bug7_word "$rc_on")" | tee -a "$summary"
   stop_server
   bug7_save_first_run custom-content-on
@@ -153,6 +157,7 @@ check_bug7() {
   # bug7_run then appends gameplay.enable-custom-content: false.
   bug7_run custom-content-off false || rc_off=$?
   stress_stop
+  if [ "$rc_off" -eq 0 ] && ! stress_ok; then bug7_precondition "custom-content-off: $STRESS_BAD"; rc_off=3; fi
   echo "check=bug7 pass=2 enable-custom-content=false result=$(bug7_word "$rc_off")" | tee -a "$summary"
   # The EXIT trap in run.sh saves the second pass's logs under $ARTIFACTS/$auth.
   cp "$SERVER_DIR/plugins/Geyser-Spigot/config.yml" "$ARTIFACTS/bug7-custom-content-off/" 2>/dev/null || true

@@ -20,9 +20,10 @@
 // result is "PASS ...", "FAIL ..." or "PRECONDITION ...".
 // During the wander the shell sends random entity events and logs the ones
 // that move a mob at once (tp, Motion, ride, dismount) to the kicks file as
-// "b4mN epoch_ms". Mobs that ever ride another (set_entity_link) have their
-// position set by the vehicle, so the verdict leaves them out and reports
-// their drift on its own line.
+// "b4mN epoch_ms". A riding mob's position is set by its vehicle, so the
+// shell dismounts every passenger before the settle; mobs that ever rode
+// (set_entity_link) are then judged like the rest once settled, and their
+// drift is also reported on its own line.
 // Geyser does not tick entity lerps while the server is frozen (neither does
 // the Java client), so a mob still moving at the freeze shows lerp lag, not
 // lasting error. The verdict leaves out every mob that moved on Bedrock in
@@ -296,9 +297,11 @@ async function run () {
   }
   all.sort((a, b) => b.d - a.d)
   const riders = all.filter((r) => r.e.rode)
-  // Verdict rows: never rode, and at rest on both sides at the freeze.
-  const movers = all.filter((r) => !r.e.rode && r.moving)
-  const rows = all.filter((r) => !r.e.rode && !r.moving)
+  // Verdict rows: every mob at rest on both sides at the freeze. Riders are
+  // in: the shell dismounts every passenger before the settle, so a settled
+  // rider's position no longer follows a vehicle.
+  const movers = all.filter((r) => r.moving)
+  const rows = all.filter((r) => !r.moving)
   const ds = rows.map((r) => r.d).sort((a, b) => a - b)
   const mean = ds.length ? ds.reduce((a, b) => a + b, 0) / ds.length : 0
   const over = rows.filter((r) => r.d > LIMIT).length
@@ -316,7 +319,8 @@ async function run () {
       `server_move=${r.serverMove === null ? 'no_pre' : r.serverMove.toFixed(3)} ` +
       `post_freeze_moves=${r.e.postMoves} post_freeze_dist=${r.e.post.toFixed(3)}`)
   }
-  log(`riders, left out of the verdict: ${riders.length}, drift max ${riderMax.toFixed(3)}, over ${LIMIT}: ${riderOver}`)
+  log(`riders (the settled ones are in the verdict): ${riders.length}, settled ${riders.filter((r) => !r.moving).length}, ` +
+    `drift max ${riderMax.toFixed(3)}, over ${LIMIT}: ${riderOver}`)
   log(`still moving at the freeze, left out of the verdict: ${movers.length}, drift max ${moverMax.toFixed(3)}, ` +
     `over ${LIMIT}: ${moverOver}` + (movers.length ? ` (${movers.slice(0, 10).map((r) => r.n).join(' ')})` : ''))
 
@@ -376,12 +380,12 @@ async function run () {
   const why = []
   if (summoned < MIN_MOBS) why.push(`server summoned ${summoned} < ${MIN_MOBS}`)
   if (rows.length < MIN_MOBS) {
-    why.push(`only ${rows.length} settled non-rider mobs matched between Bedrock and server ` +
+    why.push(`only ${rows.length} settled mobs matched between Bedrock and server ` +
       `(< ${MIN_MOBS}; ${movers.length} still moving)`)
   }
   if (moved * 2 < snap.size) why.push(`only ${moved} of ${snap.size} mobs moved on Bedrock during the wander`)
   if (noPre > MAX_NO_PRE) why.push(`no pre-freeze server Pos for ${noPre} mobs (> ${MAX_NO_PRE})`)
-  const metrics = `mobs_server=${summoned} mobs_bedrock=${snap.size} matched=${all.length - riders.length} ` +
+  const metrics = `mobs_server=${summoned} mobs_bedrock=${snap.size} matched=${all.length} ` +
     `settled=${rows.length} riders=${riders.length} moving=${movers.length} ` +
     `moved=${moved} removed=${removedNamed} drift_max=${quantile(ds, 1).toFixed(3)} ` +
     `drift_p95=${quantile(ds, 0.95).toFixed(3)} drift_mean=${mean.toFixed(3)} over_${LIMIT}=${over} over_0.1=${over01} ` +

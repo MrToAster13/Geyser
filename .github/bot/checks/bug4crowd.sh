@@ -18,7 +18,11 @@ BUG4C_WANDER_SECS=${BUG4C_WANDER_SECS:-60}
 # seconds before the freeze, so riders are dismounted, short effects have run
 # out and every pending lerp has finished when the positions are compared.
 BUG4C_SETTLE_SECS=6
-BUG4C_ERR_RE='Unknown or incomplete command|Incorrect argument'
+# Command parse errors. Brigadier follows each with a "...<--[HERE]" line,
+# which also catches parse errors with other wording ("Can't find element").
+BUG4C_ERR_RE='Unknown or incomplete command|Incorrect argument|<--\[HERE\]'
+# Commands that parsed but did nothing. Printed only, see the event gate.
+BUG4C_DATA_RE='No entity was found|Unable to |Could not |Nothing changed|[Cc]an.t |[Cc]annot |failed'
 
 # bug4c_events <seconds> <mob count> <seed>: one random event every 100 to
 # 250 ms on a random b4mN mob. Events that move a mob at once (tp, Motion,
@@ -105,7 +109,7 @@ bug4c_abort() {
 BUG4C_MOBS='cow 12 sheep 12 pig 12 chicken 12 horse 8 villager 8 zombie 8 spider 6 rabbit 8 wolf 6'
 
 check_bug4crowd() {
-  local work bot_pid name bx by bz count n i lines got rc bres seed ev_pid errs
+  local work bot_pid name bx by bz count n i lines got rc bres seed ev_pid errs evn data bad=''
   work="$SERVER_DIR/bug4crowd"
   setup_server "$jar" "$auth" || { bug4c_precondition "server setup failed"; return 3; }
   start_server || { bug4c_precondition "server start failed"; return 3; }
@@ -162,7 +166,7 @@ check_bug4crowd() {
   bug4_cmd "execute as @e[tag=b4fast] run attribute @s minecraft:movement_speed base set 0.4" \
     'value for attribute|has no attribute|No entity|<--\[HERE\]' && echo "bug4crowd: fast -> ${BUG4_LINE#*]: }"
   count=0
-  # Paper answers "Test passed. Count: 91".
+  # Paper answers "Test passed. Count: 92" when all 92 summons worked.
   if bug4_cmd "execute if entity @e[tag=b4c]" 'Test passed|Test failed|<--\[HERE\]'; then
     count=$(printf '%s\n' "$BUG4_LINE" | grep -oiE 'count: [0-9]+' | grep -oE '[0-9]+' || echo 0)
   fi
@@ -186,6 +190,19 @@ check_bug4crowd() {
   echo "bug4crowd: in-game command errors ($BUG4C_ERR_RE): $errs"
   tail -n +"$((n + 1))" "$LOG" | grep -A1 -E "$BUG4C_ERR_RE" | head -n 6 | sed 's/^/bug4crowd: error sample: /' || true
   echo "bug4crowd: jump events (tp, Motion, ride) logged: $(wc -l < "$work/kicks")"
+  data=$(tail -n +"$((n + 1))" "$LOG" | grep -E "$BUG4C_DATA_RE" | grep -cv 'Test failed' || true)
+  echo "bug4crowd: INFO event commands that parsed but did nothing ($BUG4C_DATA_RE): $data"
+  # Event gate: the crowd test proves nothing when no event ran or when an
+  # event command no longer parses (a syntax change would silently drop that
+  # event kind). It turns a PASS into PRECONDITION; a FAIL stands. Data
+  # failures do not gate yet: mount, damage_by and dismount pick random mobs
+  # and can miss, and no CI run has measured their normal rate.
+  evn=$(awk '{ print $1; exit }' "$work/events" 2>/dev/null || true)
+  [[ $evn =~ ^[0-9]+$ ]] || evn=0
+  if [ "$evn" -eq 0 ]; then bad="the event loop sent no events"
+  elif [ "${errs:-0}" -gt 0 ]; then bad="$errs command parse error lines during the events"
+  fi
+  [ -z "$bad" ] || echo "bug4crowd: events NOT VALID: $bad"
 
   # Stop every mob, then let the server keep ticking so pending lerps,
   # knockback and falls finish before the freeze. The bot counts moves from
@@ -243,7 +260,12 @@ check_bug4crowd() {
   bres=$(cat "$work/result" 2>/dev/null || true)
   echo "bug4crowd: bot result: ${bres:-none}"
   case $bres in
-    PASS*) rc=0; echo "bug4crowd: PASS every settled mob's Bedrock position matched the server's: ${bres#PASS }" ;;
+    PASS*)
+      if [ -n "$bad" ]; then
+        rc=3; bug4c_precondition "bot PASS (${bres#PASS }) is void: $bad"
+      else
+        rc=0; echo "bug4crowd: PASS every settled mob's Bedrock position matched the server's: ${bres#PASS }"
+      fi ;;
     FAIL*) rc=1; echo "bug4crowd: FAIL some settled mob's Bedrock position was off by more than the limit: ${bres#FAIL }" ;;
     *) rc=3; bug4c_precondition "bot gave no result (${bres:-none})" ;;
   esac
