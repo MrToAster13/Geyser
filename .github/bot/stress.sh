@@ -51,7 +51,7 @@ STRESS_BAD=''
 # Most data failures (as a percentage of events sent) a valid stress run has.
 # The passing stress runs on integ/26.3 (bug2stress, bug3stress, bug6stress,
 # bug7stress) counted 0 or 1 data failure lines each (the 1 was bug3's own
-# time query, not an event), against hundreds of events per run. 5% leaves
+# time query, not an event). A stress run sends 130 to 290 events. 5% leaves
 # room for a few odd failures (a mount onto a mob that just died) and still
 # trips when an event kind that is 5% or more of the mix (every kind but
 # lightning and mob summons) fails every time.
