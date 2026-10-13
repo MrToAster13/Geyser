@@ -63,8 +63,9 @@ check_bug6() {
   if ! grep -q 'bug6 bot: spawned' "$botlog"; then
     echo "PRECONDITION bug6: bot did not spawn"; cat "$botlog"; wait "$pid"; return 3
   fi
-  wait_log "$LOG_PREFIX.*joined the game" 30 || { bug6_abort "$pid" "$botlog"; return 3; }
-  name=$(sed -nE "s|${LOG_PREFIX}(.*) joined the game.*|\1|p" "$LOG" | tail -n1)
+  wait_log "${LOG_PREFIX}(System chat: )?\.?Bot6 joined the game" 30 || { bug6_abort "$pid" "$botlog"; return 3; }
+  name=$(grep -m 1 -E "${LOG_PREFIX}(System chat: )?\.?Bot6 joined the game" "$LOG" \
+    | sed -E "s|${LOG_PREFIX}(System chat: )?||; s| joined the game.*||")
   echo "bug6: bot joined as '$name'"
 
   # Clear generated mobs so only the summoned cushions sit at the spots.
@@ -81,7 +82,7 @@ check_bug6() {
   if [ "${STRESS:-0}" = 1 ]; then
     local centre
     STRESS_AVOID="$BUG6_PLAIN;$BUG6_CONTROL"
-    if ! centre=$(stress_pos "${name#System chat: }") || ! stress_start mixed $centre; then
+    if ! centre=$(stress_pos "$name") || ! stress_start mixed $centre; then
       echo "bug6: entity stress did not start"; bug6_abort "$pid" "$botlog"; return 3
     fi
   fi
@@ -99,6 +100,8 @@ check_bug6() {
     # A name tag failure stands on its own; otherwise a pass is not trusted.
     [ "$rc" -eq 1 ] || rc=3
   fi
+  # Entity stress that did not do its job voids a PASS; a FAIL stands.
+  if [ "$rc" -eq 0 ] && ! stress_ok; then echo "PRECONDITION bug6: $STRESS_BAD"; return 3; fi
   case $rc in
     0) return 0 ;;
     1) return 1 ;;

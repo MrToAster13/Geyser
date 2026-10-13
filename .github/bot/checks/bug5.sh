@@ -26,9 +26,12 @@ bug5_other_blocks() {
   done <<< "$blocks"
 }
 
-# Paper's player name for the first bot in the join line.
+# The join line of Bot5 (Floodgate may add a "." prefix to the name).
+BUG5_JOIN_RE="${LOG_PREFIX}(System chat: )?\.?Bot5 joined the game"
+
+# Paper's player name for Bot5, from its first join line.
 bug5_join_name() {
-  grep -E "$LOG_PREFIX.*joined the game" "$LOG" | head -n 1 \
+  grep -E "$BUG5_JOIN_RE" "$LOG" | head -n 1 \
     | sed -E "s#${LOG_PREFIX}(System chat: )?(.*) joined the game.*#\2#"
 }
 
@@ -60,7 +63,7 @@ check_bug5() {
   (cd "$here_b5/.." && BOT_NAME=Bot5 STAY_SECS=45 node join.js) &
   bot_pid=$!
 
-  if ! wait_log "$LOG_PREFIX.*joined the game" 150; then
+  if ! wait_log "$BUG5_JOIN_RE" 150; then
     wait "$bot_pid" || true
     echo "bug5: precondition not met: no join line"
     return 3

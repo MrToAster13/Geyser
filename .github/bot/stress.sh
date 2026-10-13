@@ -10,7 +10,9 @@
 # the server, starts a background loop that sends one random entity event
 # every 100 to 250 ms, and returns after STRESS_WARMUP seconds (default 15).
 # stress_stop ends the loop and prints the event count, the mobs still alive
-# and the failed-command counts. It is a no-op when no loop runs.
+# and the failed-command counts. It is a no-op when no loop runs. It sets
+# STRESS_BAD when the stress did not do its job (see stress_stop); checks
+# call stress_ok after stress_stop and report PRECONDITION instead of PASS.
 #
 # Every stress mob carries the tag "stress" and every event selects through
 # that tag, so no event targets a player. Mobs, items, arrows and snowballs
@@ -44,6 +46,16 @@ STRESS_AVOID=${STRESS_AVOID:-}
 STRESS_SEED=${STRESS_SEED:-$(date +%s)}
 STRESS_DIR=''
 STRESS_COUNT_FILE=''
+# Why the last stress run is not valid, empty when it is. Set by stress_stop.
+STRESS_BAD=''
+# Most data failures (as a percentage of events sent) a valid stress run has.
+# The passing stress runs on integ/26.3 (bug2stress, bug3stress, bug6stress,
+# bug7stress) counted 0 or 1 data failure lines each (the 1 was bug3's own
+# time query, not an event), against hundreds of events per run. 5% leaves
+# room for a few odd failures (a mount onto a mob that just died) and still
+# trips when an event kind that is 5% or more of the mix (every kind but
+# lightning and mob summons) fails every time.
+STRESS_MAX_DATA_PCT=${STRESS_MAX_DATA_PCT:-5}
 STRESS_NAMES=(Biscuit Rex Mochi Pepper Luna Ziggy 'Zoë' '名前' Nugget Olive)
 STRESS_COLORS=(red gold aqua green light_purple yellow)
 # Failure feedback from commands that parsed but did nothing.
@@ -268,6 +280,7 @@ stress_count() {
 stress_start() {
   local types t i got min
   if [ -n "$STRESS_PID" ]; then stress_stop; fi
+  STRESS_BAD=''
   STRESS_RUN=$((STRESS_RUN + 1))
   STRESS_MODE=${1:-mixed}
   STRESS_CX=${2:-}; STRESS_CY=${3:-}; STRESS_CZ=${4:-}
@@ -330,7 +343,19 @@ stress_start() {
   echo "stress running: $(cat "$STRESS_COUNT_FILE" 2>/dev/null) events so far"
 }
 
-# stress_stop: ends the loop and reports. Safe to call twice; always returns 0.
+# stress_ok: 0 when the last stress run was valid (or none ran), 1 with the
+# reason in STRESS_BAD when it was not. Call after stress_stop.
+stress_ok() {
+  [ -z "$STRESS_BAD" ]
+}
+
+# stress_stop: ends the loop and reports. Safe to call twice. It always
+# returns 0: run.sh's EXIT trap calls it under set -e, and a non-zero return
+# there would skip stop_server and save_logs. The verdict goes to STRESS_BAD
+# instead, read through stress_ok. The run is not valid when no event was
+# sent, when latest.log holds any command parse error (a changed command
+# syntax makes every event of that kind fail), or when data failures exceed
+# STRESS_MAX_DATA_PCT percent of the events sent.
 stress_stop() {
   [ -n "${STRESS_PID:-}" ] || return 0
   local pid=$STRESS_PID n alive=unknown parse=0 data=0 spid new
@@ -338,6 +363,7 @@ stress_stop() {
   kill "$pid" 2>/dev/null || true
   wait "$pid" 2>/dev/null || true
   n=$(cat "$STRESS_COUNT_FILE" 2>/dev/null) || n=0
+  [[ $n =~ ^[0-9]+$ ]] || n=0
   spid=$(cat "$SERVER_DIR/server.pid" 2>/dev/null) || spid=''
   if [ -n "$spid" ] && kill -0 "$spid" 2>/dev/null; then
     alive=$(stress_count "sdone$STRESS_RUN") || alive=unknown
@@ -346,10 +372,20 @@ stress_stop() {
   STRESS_FORCED=''
   new="$STRESS_DIR/log-run$STRESS_RUN.txt"
   tail -n +"$((STRESS_LINE0 + 1))" "$LOG" > "$new" 2>/dev/null || true
-  parse=$(grep -cE 'Unknown or incomplete command|Incorrect argument' "$new" 2>/dev/null) || parse=0
+  # Brigadier marks every parse error with a "<--[HERE]" line; one error can
+  # count twice here (message line and marker line), which only matters as > 0.
+  parse=$(grep -cE 'Unknown or incomplete command|Incorrect argument|<--\[HERE\]' "$new" 2>/dev/null) || parse=0
   data=$(grep -E "$STRESS_FAILRE" "$new" 2>/dev/null | grep -cvE "$STRESS_NOTFAIL") || data=0
-  echo "stress events=${n:-0} run=$STRESS_RUN seed=$STRESS_SEED alive_at_stop=${alive:-unknown}"
+  echo "stress events=$n run=$STRESS_RUN seed=$STRESS_SEED alive_at_stop=${alive:-unknown}"
   echo "stress failed_commands parse=$parse data=$data (latest.log lines since stress_start)"
+  if [ "$n" -eq 0 ]; then
+    STRESS_BAD="entity stress sent no events"
+  elif [ "$parse" -gt 0 ]; then
+    STRESS_BAD="entity stress hit $parse command parse error lines"
+  elif [ $((data * 100)) -gt $((n * STRESS_MAX_DATA_PCT)) ]; then
+    STRESS_BAD="entity stress data failures $data of $n events, over $STRESS_MAX_DATA_PCT%"
+  fi
+  if [ -n "$STRESS_BAD" ]; then echo "stress: NOT VALID: $STRESS_BAD"; else echo "stress: valid"; fi
   if [ "$parse" -gt 0 ] || [ "$data" -gt 0 ]; then
     echo "stress: failure lines (count, text):"
     grep -E "Unknown or incomplete command|Incorrect argument|<--\[HERE\]|$STRESS_FAILRE" "$new" \
