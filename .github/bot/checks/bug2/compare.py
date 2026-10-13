@@ -29,8 +29,13 @@ A Java recipe is
   wrong     Bedrock recipes with the same output exist but none match, or the
             matched ones leave some ingredient items out (incomplete),
   missing   no Bedrock recipe has the same output item,
-  excluded  not decidable: a same-output Bedrock recipe uses an item_tag that
-            is not the Java tag id (R5-a), listed with the reason.
+  excluded  not decidable: the recipe is neither present nor missing, and it
+            would be present only if a Bedrock item_tag that is not the Java
+            tag id (R5-a) accepted the Java items of its slot. The harness has
+            no Bedrock tag contents, so it cannot decide those. A recipe that
+            fails to match even with every such tag taken as accepting is
+            wrong, not excluded. Listed with the reason.
+More than EXCLUDED_ALLOWANCE excluded recipes is exit 3 (unverified).
 """
 import json
 import os
@@ -38,6 +43,12 @@ import sys
 from collections import defaultdict
 
 LIST_LIMIT = 20
+# The last good run (run 38317381443, 1185 subset recipes) excluded 10, all
+# Bedrock-only tags such as minecraft:coals, minecraft:egg and minecraft:sand.
+# 15 leaves room for a few new Bedrock tags in an upstream update; a jump past
+# it means tag handling broke or a translation regression hides behind
+# undecidable tags, so the result is unverified, not PASS.
+EXCLUDED_ALLOWANCE = 15
 WILDCARD = 32767
 MAP = {}  # java id -> (bedrock id, bedrock data)
 
@@ -184,15 +195,16 @@ def java_recipes(root, tags):
     return out, dict(skipped)
 
 
-def slot_ok(java, bed, used_tags):
-    """java: None or (items, tag). bed: bot descriptor."""
+def slot_ok(java, bed, lenient=False):
+    """java: None or (items, tag). bed: bot descriptor. lenient: an item_tag
+    with another id than the Java tag counts as matching (undecidable)."""
     if java is None:
         return bed["t"] == "empty"
     items, tag = java
     if bed["t"] == "name":
         return any(same_item(i, bed["name"], bed.get("meta")) for i in items)
     if bed["t"] == "tag":
-        return tag is not None and bed["tag"] == tag
+        return (tag is not None and bed["tag"] == tag) or lenient
     return False
 
 
@@ -206,7 +218,7 @@ def accepted(java, bed):
     return {i for i in items if same_item(i, bed["name"], bed.get("meta"))}
 
 
-def match_shaped(j, b):
+def match_shaped(j, b, lenient=False):
     if b["kind"] != "shaped" or b["w"] != j["w"] or b["h"] != j["h"] or len(b["in"]) != len(j["grid"]):
         return None
     w = j["w"]
@@ -214,12 +226,12 @@ def match_shaped(j, b):
     orient.append([r * w + (w - 1 - c) for r in range(j["h"]) for c in range(w)])
     for idx in orient:
         # Bedrock slot i holds the Java ingredient at idx[i] in this orientation.
-        if all(slot_ok(j["grid"][idx[i]], b["in"][i], None) for i in range(len(idx))):
+        if all(slot_ok(j["grid"][idx[i]], b["in"][i], lenient) for i in range(len(idx))):
             return [(j["grid"][idx[i]], b["in"][i]) for i in range(len(idx))]
     return None
 
 
-def match_shapeless(j, b):
+def match_shapeless(j, b, lenient=False):
     if b["kind"] != "shapeless":
         return None
     bed = [d for d in b["in"] if d["t"] != "empty"]
@@ -233,7 +245,7 @@ def match_shapeless(j, b):
         if i == len(ings):
             return True
         for k, d in enumerate(bed):
-            if not used[k] and slot_ok(ings[i], d, None):
+            if not used[k] and slot_ok(ings[i], d, lenient):
                 used[k] = True
                 pairs.append((ings[i], d))
                 if go(i + 1):
@@ -347,33 +359,46 @@ def main():
         print("bug2: subset empty, result unverified")
         return 3
 
-    present, wrong, missing, excluded = [], [], [], []
-    for j in subset:
-        cands = [b for b in by_out.get(bid(j["out"]), [])
-                 if same_item(j["out"], b["out"][0]["name"], b["out"][0].get("meta"))]
+    def coverage(j, cands, lenient):
+        """(matched count, uncovered Java items, foreign tags used to match)."""
         matcher = match_shaped if j["kind"] == "shaped" else match_shapeless
         cover = defaultdict(set)
         matched = 0
+        foreign = set()
         for b in cands:
             if b["out"][0]["count"] != j["count"]:
                 continue
-            pairs = matcher(j, b)
+            pairs = matcher(j, b, lenient)
             if pairs is None:
                 continue
             matched += 1
             for jx, bx in pairs:
                 if jx is not None:
                     cover[jx] |= accepted(jx, bx)
-        java_tags = {x[1] for x in (j["grid"] if j["kind"] == "shaped" else j["ings"]) if x is not None and x[1]}
-        foreign = sorted({d["tag"] for b in cands for d in b["in"] if d["t"] == "tag" and d["tag"] not in java_tags})
+                    if bx["t"] == "tag" and bx["tag"] != jx[1]:
+                        foreign.add(bx["tag"])
         ing = j["grid"] if j["kind"] == "shaped" else j["ings"]
         gaps = sorted({i for x in ing if x is not None for i in x[0] - cover[x]}) if matched else []
+        return matched, gaps, sorted(foreign)
+
+    present, wrong, missing, excluded = [], [], [], []
+    for j in subset:
+        cands = [b for b in by_out.get(bid(j["out"]), [])
+                 if same_item(j["out"], b["out"][0]["name"], b["out"][0].get("meta"))]
+        matched, gaps, _ = coverage(j, cands, False)
         if matched and not gaps:
             present.append(j)
-        elif foreign:
-            excluded.append((j, f"Bedrock item_tag {', '.join(foreign)} is not a Java tag id of this recipe"))
-        elif not cands:
+            continue
+        if not cands:
             missing.append(j)
+            continue
+        # Exclude only when the foreign tags are exactly what would close the
+        # gap: with every foreign tag taken as accepting, the recipe matches
+        # and covers every Java item. Anything else stays wrong.
+        l_matched, l_gaps, foreign = coverage(j, cands, True)
+        if l_matched and not l_gaps and foreign:
+            excluded.append((j, f"Bedrock item_tag {', '.join(foreign)} is not a Java tag id of this recipe"
+                                f" (strict: {'incomplete' if matched else 'no match'})"))
         elif matched:
             wrong.append((j, "incomplete: no matching Bedrock recipe accepts " + ", ".join(gaps[:8]), cands))
         else:
@@ -388,10 +413,15 @@ def main():
         print(f"bug2: wrong {j['id']}: {why}; java {describe_java(j)}; mapped {describe_java(j, True)}")
         for b in cands[:3]:
             print(f"bug2:   bedrock {describe_bed(b)}")
+    if wrong or missing:
+        return 1
     if len(subset) == len(excluded):
         print("bug2: every subset recipe was excluded, result unverified")
         return 3
-    return 1 if wrong or missing else 0
+    if len(excluded) > EXCLUDED_ALLOWANCE:
+        print(f"bug2: {len(excluded)} excluded recipes exceed the allowance of {EXCLUDED_ALLOWANCE}, result unverified")
+        return 3
+    return 0
 
 
 if __name__ == "__main__":

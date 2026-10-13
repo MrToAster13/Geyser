@@ -199,6 +199,8 @@ jobs:
           set -euo pipefail
           git clone --no-checkout "$RUNNER_TEMP/bundle/x.bundle" geyser
           git -C geyser checkout --detach "$SHA"
+          # bug2 compares against the mappings items.json at the merged sha.
+          git -C geyser submodule update --init core/src/main/resources/mappings
 
       - name: Download Geyser-Spigot
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
@@ -226,6 +228,9 @@ jobs:
           SERVER_DIR: ${{ runner.temp }}/server
           ARTIFACTS: ${{ runner.temp }}/bot-logs
           CHECK: ${{ matrix.check }}
+          # The jar is downloaded outside the tree, so bug2 cannot find the
+          # mappings from the jar path.
+          BUG2_ITEMS: ${{ github.workspace }}/geyser/core/src/main/resources/mappings/items.json
         run: bash geyser/.github/bot/run.sh "$CHECK" "$RUNNER_TEMP/jar/Geyser-Spigot.jar"
 
       - name: Upload logs
