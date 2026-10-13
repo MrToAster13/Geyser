@@ -159,6 +159,9 @@ if b["parseErrors"]:
     echo "bug2: exception blocks in latest.log (diagnostic):"; printf '%s\n' "$blocks" | head -n 60
   fi
 
+  if [ "$rc" -eq 0 ] && ! stress_ok; then
+    bug2_precondition "$STRESS_BAD"; return 3
+  fi
   case $rc in
     0) echo "bug2: PASS every recipe in the subset is present and complete; slowness unverified (proxy only)" ;;
     1) echo "bug2: FAIL subset recipes missing or wrong; slowness unverified (proxy only)" ;;
