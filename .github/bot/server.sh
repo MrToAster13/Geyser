@@ -54,6 +54,9 @@ java:
 advanced:
   bedrock:
     validate-bedrock-login: false
+# The startup update check calls an outside server. Its timeouts showed up
+# as exception blocks and failed checks, so the bot turns it off.
+notify-on-new-bedrock-update: false
 config-version: 9
 CFG
 }
