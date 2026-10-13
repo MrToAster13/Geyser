@@ -185,6 +185,8 @@ check_bug4crowd() {
   wait "$ev_pid" || true
   # Riders' positions follow their vehicle, so get everyone down first.
   send "execute as @e[tag=b4c] on passengers run ride @s dismount" || true
+  # Give the dismount reply time to reach latest.log before counting errors.
+  sleep 2
   errs=$(tail -n +"$((n + 1))" "$LOG" | grep -cE "$BUG4C_ERR_RE" || true)
   echo "bug4crowd: events sent: $(cat "$work/events" 2>/dev/null || echo none)"
   echo "bug4crowd: in-game command errors ($BUG4C_ERR_RE): $errs"

@@ -56,6 +56,7 @@ STRESS_BAD=''
 # trips when an event kind that is 5% or more of the mix (every kind but
 # lightning and mob summons) fails every time.
 STRESS_MAX_DATA_PCT=${STRESS_MAX_DATA_PCT:-5}
+[[ $STRESS_MAX_DATA_PCT =~ ^[0-9]+$ ]] || STRESS_MAX_DATA_PCT=5
 STRESS_NAMES=(Biscuit Rex Mochi Pepper Luna Ziggy 'Zoë' '名前' Nugget Olive)
 STRESS_COLORS=(red gold aqua green light_purple yellow)
 # Failure feedback from commands that parsed but did nothing.
@@ -372,10 +373,12 @@ stress_stop() {
   STRESS_FORCED=''
   new="$STRESS_DIR/log-run$STRESS_RUN.txt"
   tail -n +"$((STRESS_LINE0 + 1))" "$LOG" > "$new" 2>/dev/null || true
-  # Brigadier marks every parse error with a "<--[HERE]" line; one error can
-  # count twice here (message line and marker line), which only matters as > 0.
-  parse=$(grep -cE 'Unknown or incomplete command|Incorrect argument|<--\[HERE\]' "$new" 2>/dev/null) || parse=0
-  data=$(grep -E "$STRESS_FAILRE" "$new" 2>/dev/null | grep -cvE "$STRESS_NOTFAIL") || data=0
+  # Command feedback is logged as "System chat:" lines; plugin log lines that
+  # happen to say "Incorrect argument" do not count. Brigadier marks every
+  # parse error with an unprefixed "<--[HERE]" line; one error can count twice
+  # here (message line and marker line), which only matters as > 0.
+  parse=$(grep -cE "${LOG_PREFIX}System chat: .*(Unknown or incomplete command|Incorrect argument)|^[^[].*<--\[HERE\]" "$new" 2>/dev/null) || parse=0
+  data=$(grep -E "${LOG_PREFIX}System chat: .*($STRESS_FAILRE)" "$new" 2>/dev/null | grep -cvE "$STRESS_NOTFAIL") || data=0
   echo "stress events=$n run=$STRESS_RUN seed=$STRESS_SEED alive_at_stop=${alive:-unknown}"
   echo "stress failed_commands parse=$parse data=$data (latest.log lines since stress_start)"
   if [ "$n" -eq 0 ]; then

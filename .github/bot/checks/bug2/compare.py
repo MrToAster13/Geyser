@@ -51,6 +51,7 @@ LIST_LIMIT = 20
 EXCLUDED_ALLOWANCE = 15
 WILDCARD = 32767
 MAP = {}  # java id -> (bedrock id, bedrock data)
+TAGS = None  # Tags for the Java jar, set in main
 
 
 def load_mappings(path, bed_items):
@@ -195,16 +196,29 @@ def java_recipes(root, tags):
     return out, dict(skipped)
 
 
+def foreign_tag_ok(items, btag):
+    """Lenient match for a Bedrock item_tag whose id is not the Java tag id.
+    A tag with no Java tag file is Bedrock-only and undecidable, so it counts.
+    A tag that is also a Java tag counts only if it holds every Java item of
+    the slot; a different Java tag (planks for logs) is a wrong ingredient."""
+    try:
+        return set(items) <= set(TAGS.resolve(btag))
+    except ValueError:
+        return True
+
+
 def slot_ok(java, bed, lenient=False):
     """java: None or (items, tag). bed: bot descriptor. lenient: an item_tag
-    with another id than the Java tag counts as matching (undecidable)."""
+    with another id than the Java tag counts as matching when foreign_tag_ok."""
     if java is None:
         return bed["t"] == "empty"
     items, tag = java
     if bed["t"] == "name":
         return any(same_item(i, bed["name"], bed.get("meta")) for i in items)
     if bed["t"] == "tag":
-        return (tag is not None and bed["tag"] == tag) or lenient
+        if tag is not None and bed["tag"] == tag:
+            return True
+        return lenient and foreign_tag_ok(items, bed["tag"])
     return False
 
 
@@ -302,7 +316,8 @@ def main():
           f"nonzero bedrock_data: {sum(1 for v in MAP.values() if v[1])}, "
           f"geysermc custom item overrides: {overrides or 'none'}")
     bed_items = set(bot["items"].values())
-    tags = Tags(root)
+    global TAGS
+    tags = TAGS = Tags(root)
     java, skipped = java_recipes(root, tags)
     print(f"bug2: java crafting recipes {len(java)} (other types skipped: {sum(skipped.values())})")
 

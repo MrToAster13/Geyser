@@ -20,7 +20,7 @@ run_join() {
   # Return 2 only when the bot fails, so only that triggers the D1 fallback.
   (cd "$here" && BOT_NAME=Bot1 STAY_SECS=30 node join.js) || return 2
   # The join line gives the exact name Paper uses (D1, R4-f).
-  grep -E "$LOG_PREFIX.*joined the game" "$LOG" || { echo "no join line" >&2; return 1; }
+  grep -E "${LOG_PREFIX}(System chat: )?\.?Bot1 joined the game" "$LOG" || { echo "no join line" >&2; return 1; }
   local blocks
   blocks=$(exception_blocks) || return 1
   if [ -n "$blocks" ]; then
